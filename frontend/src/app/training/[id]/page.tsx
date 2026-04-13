@@ -2,6 +2,12 @@
 
 import { useState, useEffect } from 'react';
 import { useRouter, useParams } from 'next/navigation';
+import { PageErrorState } from '@/components/PageErrorState';
+import { PageLoading } from '@/components/PageLoading';
+import { StatusBanner } from '@/components/StatusBanner';
+import { apiRequest } from '@/lib/api';
+import { hasAccessToken } from '@/lib/auth';
+import { useRequireAuth } from '@/hooks/useRequireAuth';
 
 interface TrainingDetail {
   id: number;
@@ -17,10 +23,17 @@ interface TrainingDetail {
   icon: string;
 }
 
+interface TrainingNotice {
+  title?: string;
+  message: string;
+  tone: 'info' | 'success' | 'warning' | 'error';
+}
+
 export default function TrainingDetailPage() {
   const router = useRouter();
   const params = useParams();
   const trainingId = params.id as string;
+  useRequireAuth();
 
   const [training, setTraining] = useState<TrainingDetail | null>(null);
   const [loading, setLoading] = useState(true);
@@ -31,21 +44,50 @@ export default function TrainingDetailPage() {
   const [showFeedback, setShowFeedback] = useState(false);
   const [rating, setRating] = useState(0);
   const [feedback, setFeedback] = useState('');
+  const [elapsedSeconds, setElapsedSeconds] = useState(0);
+  const [loadError, setLoadError] = useState('');
+  const [notice, setNotice] = useState<TrainingNotice | null>(null);
+  const [isSubmittingFeedback, setIsSubmittingFeedback] = useState(false);
 
   useEffect(() => {
-    const token = localStorage.getItem('access_token');
-    if (!token) {
-      router.push('/login');
+    if (!hasAccessToken()) {
+      setLoading(false);
       return;
     }
-    
-    fetchTrainingDetail();
-  }, [trainingId]);
+
+    let cancelled = false;
+
+    const loadTrainingDetail = async () => {
+      setLoadError('');
+
+      try {
+        const data = await apiRequest<TrainingDetail>(`/api/training/${trainingId}`);
+
+        if (!cancelled && data) {
+          setTraining(data);
+        }
+      } catch (error) {
+        console.error('获取训练详情失败:', error);
+        setLoadError('训练内容暂时无法加载，请返回训练列表后重试。');
+      } finally {
+        if (!cancelled) {
+          setLoading(false);
+        }
+      }
+    };
+
+    void loadTrainingDetail();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [router, trainingId]);
 
   useEffect(() => {
     let timer: NodeJS.Timeout;
     if (isTraining && !isPaused && timeRemaining > 0) {
       timer = setInterval(() => {
+        setElapsedSeconds((prev) => prev + 1);
         setTimeRemaining(prev => {
           if (prev <= 1) {
             handleTrainingComplete();
@@ -58,71 +100,51 @@ export default function TrainingDetailPage() {
     return () => clearInterval(timer);
   }, [isTraining, isPaused, timeRemaining]);
 
-  const fetchTrainingDetail = async () => {
-    try {
-      const token = localStorage.getItem('access_token');
-      const response = await fetch(`http://127.0.0.1:8000/api/training/${trainingId}`, {
-        headers: {
-          'Authorization': `Bearer ${token}`,
-        },
-      });
-
-      if (response.ok) {
-        const data = await response.json();
-        setTraining(data);
-      } else {
-        alert('获取训练详情失败');
-        router.push('/training');
-      }
-    } catch (error) {
-      console.error('获取训练详情失败:', error);
-      alert('网络错误，请重试');
-    } finally {
-      setLoading(false);
-    }
-  };
-
   const startTraining = () => {
     if (training) {
+      setNotice(null);
       setIsTraining(true);
       setTimeRemaining(training.duration * 60);
       setCurrentStep(0);
+      setElapsedSeconds(0);
     }
   };
 
   const handleTrainingComplete = () => {
+    setNotice(null);
     setIsTraining(false);
     setShowFeedback(true);
   };
 
   const submitFeedback = async () => {
+    setNotice(null);
+    setIsSubmittingFeedback(true);
+
     try {
-      const token = localStorage.getItem('access_token');
-      const response = await fetch('http://127.0.0.1:8000/api/training/complete', {
+      const actualDurationMinutes = Math.max(1, Math.round(elapsedSeconds / 60));
+
+      await apiRequest('/api/training/complete', {
         method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${token}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
+        json: {
           training_id: parseInt(trainingId),
-          duration: training!.duration,
+          duration: actualDurationMinutes,
           feedback: {
             rating,
             comment: feedback,
           },
-        }),
+        },
       });
 
-      if (response.ok) {
-        alert('训练完成！');
-        router.push('/training/history');
-      } else {
-        alert('提交失败，请重试');
-      }
+      router.push('/training/history');
     } catch (error) {
       console.error('提交失败:', error);
-      alert('网络错误，请重试');
+      setNotice({
+        title: '提交失败',
+        message: '训练反馈暂时无法提交，请稍后重试。',
+        tone: 'error',
+      });
+    } finally {
+      setIsSubmittingFeedback(false);
     }
   };
 
@@ -133,18 +155,27 @@ export default function TrainingDetailPage() {
   };
 
   if (loading) {
+    return <PageLoading label="加载训练内容..." tone="blue" />;
+  }
+
+  if (loadError) {
     return (
-      <div className="min-h-screen bg-gradient-to-br from-blue-50 via-purple-50 to-pink-50 flex items-center justify-center">
-        <div className="text-center">
-          <div className="inline-block animate-spin rounded-full h-12 w-12 border-4 border-blue-600 border-t-transparent"></div>
-          <p className="mt-4 text-gray-600">加载中...</p>
-        </div>
-      </div>
+      <PageErrorState
+        message={loadError}
+        actionLabel="返回训练列表"
+        onAction={() => router.push('/training')}
+      />
     );
   }
 
   if (!training) {
-    return null;
+    return hasAccessToken() ? (
+      <PageErrorState
+        message="当前训练内容不存在或暂时不可用。"
+        actionLabel="返回训练列表"
+        onAction={() => router.push('/training')}
+      />
+    ) : null;
   }
 
   return (
@@ -167,6 +198,17 @@ export default function TrainingDetailPage() {
 
       {/* 主内容 */}
       <div className="max-w-4xl mx-auto px-4 py-8">
+        {notice ? (
+          <div className="mb-6">
+            <StatusBanner
+              title={notice.title}
+              message={notice.message}
+              tone={notice.tone}
+              onClose={() => setNotice(null)}
+            />
+          </div>
+        ) : null}
+
         {!isTraining && !showFeedback ? (
           // 训练介绍页
           <div className="bg-white rounded-2xl shadow-xl p-8">
@@ -333,6 +375,9 @@ export default function TrainingDetailPage() {
               <div className="text-6xl mb-4">🎉</div>
               <h2 className="text-3xl font-bold text-gray-800 mb-2">训练完成！</h2>
               <p className="text-gray-600">给这次训练打个分吧</p>
+              <p className="mt-2 text-sm text-gray-500">
+                本次有效训练时长：{Math.max(1, Math.round(elapsedSeconds / 60))} 分钟
+              </p>
             </div>
 
             <div className="mb-6">
@@ -360,7 +405,8 @@ export default function TrainingDetailPage() {
                 value={feedback}
                 onChange={(e) => setFeedback(e.target.value)}
                 placeholder="分享一下这次训练的感受..."
-                className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-transparent resize-none"
+                disabled={isSubmittingFeedback}
+                className="w-full resize-none rounded-xl border border-gray-300 px-4 py-3 focus:border-transparent focus:ring-2 focus:ring-blue-500 disabled:bg-gray-100"
                 rows={4}
               />
             </div>
@@ -374,10 +420,10 @@ export default function TrainingDetailPage() {
               </button>
               <button
                 onClick={submitFeedback}
-                disabled={rating === 0}
+                disabled={rating === 0 || isSubmittingFeedback}
                 className="flex-1 py-3 bg-gradient-to-r from-blue-600 to-purple-600 text-white font-semibold rounded-xl hover:shadow-lg transition-all disabled:opacity-50 disabled:cursor-not-allowed"
               >
-                提交反馈
+                {isSubmittingFeedback ? '提交中...' : '提交反馈'}
               </button>
             </div>
           </div>

@@ -2,6 +2,11 @@
 
 import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
+import { PageErrorState } from '@/components/PageErrorState';
+import { PageLoading } from '@/components/PageLoading';
+import { apiRequest } from '@/lib/api';
+import { clearAuthSession, hasAccessToken } from '@/lib/auth';
+import { useRequireAuth } from '@/hooks/useRequireAuth';
 
 interface UserInfo {
   id: number;
@@ -12,48 +17,47 @@ interface UserInfo {
 
 export default function DashboardPage() {
   const router = useRouter();
+  useRequireAuth();
   const [userInfo, setUserInfo] = useState<UserInfo | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
 
   useEffect(() => {
-    checkAuth();
-  }, []);
-
-  const checkAuth = async () => {
-    const token = localStorage.getItem('access_token');
-    
-    if (!token) {
-      router.push('/login');
+    if (!hasAccessToken()) {
+      setLoading(false);
       return;
     }
 
-    try {
-      const response = await fetch('http://127.0.0.1:8000/api/auth/me', {
-        headers: {
-          'Authorization': `Bearer ${token}`,
-        },
-      });
+    let cancelled = false;
 
-      if (!response.ok) {
-        throw new Error('认证失败');
+    const loadUserInfo = async () => {
+      try {
+        const data = await apiRequest<UserInfo>('/api/auth/me');
+
+        if (cancelled || !data) {
+          return;
+        }
+
+        setUserInfo(data);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : '认证失败';
+        setError(message);
+      } finally {
+        if (!cancelled) {
+          setLoading(false);
+        }
       }
+    };
 
-      const data = await response.json();
-      setUserInfo(data);
-    } catch (err: any) {
-      setError(err.message);
-      localStorage.removeItem('access_token');
-      localStorage.removeItem('username');
-      router.push('/login');
-    } finally {
-      setLoading(false);
-    }
-  };
+    void loadUserInfo();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [router]);
 
   const handleLogout = () => {
-    localStorage.removeItem('access_token');
-    localStorage.removeItem('username');
+    clearAuthSession();
     router.push('/');
   };
 
@@ -67,24 +71,17 @@ export default function DashboardPage() {
   ];
 
   if (loading) {
-    return (
-      <div className="min-h-screen bg-gradient-to-br from-pink-50 via-purple-50 to-blue-50 flex items-center justify-center">
-        <div className="text-center">
-          <div className="text-4xl mb-4">💕</div>
-          <p className="text-gray-600">加载中...</p>
-        </div>
-      </div>
-    );
+    return <PageLoading label="加载用户信息..." tone="pink" />;
   }
 
   if (error) {
     return (
-      <div className="min-h-screen bg-gradient-to-br from-pink-50 via-purple-50 to-blue-50 flex items-center justify-center">
-        <div className="text-center">
-          <div className="text-4xl mb-4">❌</div>
-          <p className="text-red-600">{error}</p>
-        </div>
-      </div>
+      <PageErrorState
+        title="进入首页失败"
+        message={error}
+        actionLabel="重新加载"
+        onAction={() => window.location.reload()}
+      />
     );
   }
 
@@ -129,14 +126,7 @@ export default function DashboardPage() {
           {modules.map((module) => (
             <button
               key={module.id}
-              onClick={() => {
-                if (module.id === 1 || module.id === 2 || module.id === 3 || module.id === 4 || module.id === 5 || module.id === 6) {
-                  // 所有核心功能模块已实现
-                  router.push(module.path);
-                } else {
-                  alert(`${module.name}功能即将上线！`);
-                }
-              }}
+              onClick={() => router.push(module.path)}
               className="bg-white rounded-2xl shadow-lg hover:shadow-2xl transform hover:-translate-y-2 transition-all duration-300 p-8 text-left"
             >
               <div className={`w-16 h-16 rounded-xl bg-gradient-to-r ${module.color} flex items-center justify-center text-3xl mb-4`}>

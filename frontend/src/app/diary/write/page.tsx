@@ -2,11 +2,17 @@
 
 import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
-
-interface Emotion {
-  emotion: string;
-  intensity: number;
-}
+import { StatusBanner } from '@/components/StatusBanner';
+import { apiRequest } from '@/lib/api';
+import { hasAccessToken } from '@/lib/auth';
+import {
+  calculateWritingDurationMinutes,
+  normalizeDiaryAiFeedback,
+  type DiaryAiFeedback,
+  type DiaryEmotion,
+  type DiaryLifeDimensions,
+} from '@/lib/diary';
+import { useRequireAuth } from '@/hooks/useRequireAuth';
 
 interface Template {
   id: string;
@@ -15,6 +21,24 @@ interface Template {
   icon: string;
   questions: string[];
 }
+
+interface DiaryCreateResponse {
+  ai_feedback?: unknown;
+}
+
+interface DiaryNotice {
+  title?: string;
+  message: string;
+  tone: 'info' | 'success' | 'warning' | 'error';
+}
+
+const INITIAL_LIFE_DIMENSIONS: DiaryLifeDimensions = {
+  sleep: 3,
+  diet: 3,
+  exercise: 0,
+  social: 0,
+  productivity: 3,
+};
 
 const AVAILABLE_EMOTIONS = [
   { name: '快乐', icon: '😊', type: 'positive' },
@@ -33,81 +57,92 @@ const AVAILABLE_EMOTIONS = [
 
 export default function DiaryWritePage() {
   const router = useRouter();
+  useRequireAuth();
   const [content, setContent] = useState('');
-  const [selectedEmotions, setSelectedEmotions] = useState<Emotion[]>([]);
+  const [selectedEmotions, setSelectedEmotions] = useState<DiaryEmotion[]>([]);
   const [emotionTrigger, setEmotionTrigger] = useState('');
-  const [lifeDimensions, setLifeDimensions] = useState({
-    sleep: 3,
-    diet: 3,
-    exercise: 0,
-    social: 0,
-    productivity: 3,
-  });
+  const [lifeDimensions, setLifeDimensions] =
+    useState<DiaryLifeDimensions>(INITIAL_LIFE_DIMENSIONS);
   const [guidedAnswer, setGuidedAnswer] = useState('');
   const [guidedQuestion, setGuidedQuestion] = useState('');
   const [templates, setTemplates] = useState<Template[]>([]);
   const [selectedTemplate, setSelectedTemplate] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [showAIFeedback, setShowAIFeedback] = useState(false);
-  const [aiFeedback, setAiFeedback] = useState<any>(null);
+  const [aiFeedback, setAiFeedback] = useState<DiaryAiFeedback | null>(null);
+  const [notice, setNotice] = useState<DiaryNotice | null>(null);
   const [diaryDate, setDiaryDate] = useState(new Date().toISOString().split('T')[0]);
+  const [writingStartedAt, setWritingStartedAt] = useState<number>(() => Date.now());
 
   useEffect(() => {
-    const token = localStorage.getItem('access_token');
-    if (!token) {
-      router.push('/login');
+    if (!hasAccessToken()) {
       return;
     }
 
-    fetchTemplates();
-    fetchGuidedQuestion();
+    let cancelled = false;
+
+    const loadInitialData = async () => {
+      try {
+        const [templateData, guidedData] = await Promise.all([
+          apiRequest<Template[]>('/api/diary/templates/list'),
+          apiRequest<{ question?: string }>('/api/diary/guided-questions/today'),
+        ]);
+
+        if (cancelled) {
+          return;
+        }
+
+        setTemplates(templateData ?? []);
+        setGuidedQuestion(guidedData?.question ?? '');
+      } catch (error) {
+        console.error('初始化日记页失败:', error);
+        setNotice({
+          title: '初始化失败',
+          message: '模板或今日引导问题暂时无法加载，你仍然可以直接记录今天的心情。',
+          tone: 'warning',
+        });
+      }
+    };
+
+    void loadInitialData();
+
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
-  const fetchTemplates = async () => {
-    try {
-      const token = localStorage.getItem('access_token');
-      const response = await fetch('http://127.0.0.1:8000/api/diary/templates/list', {
-        headers: { 'Authorization': `Bearer ${token}` },
-      });
-
-      if (response.ok) {
-        const data = await response.json();
-        setTemplates(data);
-      }
-    } catch (error) {
-      console.error('获取模板失败:', error);
-    }
-  };
-
-  const fetchGuidedQuestion = async () => {
-    try {
-      const token = localStorage.getItem('access_token');
-      const response = await fetch('http://127.0.0.1:8000/api/diary/guided-questions/today', {
-        headers: { 'Authorization': `Bearer ${token}` },
-      });
-
-      if (response.ok) {
-        const data = await response.json();
-        setGuidedQuestion(data.question);
-      }
-    } catch (error) {
-      console.error('获取引导问题失败:', error);
-    }
+  const resetDiaryForm = () => {
+    setShowAIFeedback(false);
+    setAiFeedback(null);
+    setNotice(null);
+    setContent('');
+    setSelectedEmotions([]);
+    setEmotionTrigger('');
+    setLifeDimensions(INITIAL_LIFE_DIMENSIONS);
+    setGuidedAnswer('');
+    setSelectedTemplate(null);
+    setDiaryDate(new Date().toISOString().split('T')[0]);
+    setWritingStartedAt(Date.now());
   };
 
   const toggleEmotion = (emotionName: string) => {
-    const existing = selectedEmotions.find(e => e.emotion === emotionName);
+    const existing = selectedEmotions.find((emotion) => emotion.emotion === emotionName);
     if (existing) {
-      setSelectedEmotions(selectedEmotions.filter(e => e.emotion !== emotionName));
+      setSelectedEmotions((prev) =>
+        prev.filter((emotion) => emotion.emotion !== emotionName)
+      );
     } else {
-      setSelectedEmotions([...selectedEmotions, { emotion: emotionName, intensity: 5 }]);
+      setSelectedEmotions((prev) => [
+        ...prev,
+        { emotion: emotionName, intensity: 5 },
+      ]);
     }
   };
 
   const updateEmotionIntensity = (emotionName: string, intensity: number) => {
-    setSelectedEmotions(
-      selectedEmotions.map(e =>
-        e.emotion === emotionName ? { ...e, intensity } : e
+    setSelectedEmotions((prev) =>
+      prev.map((emotion) =>
+        emotion.emotion === emotionName ? { ...emotion, intensity } : emotion
       )
     );
   };
@@ -120,21 +155,21 @@ export default function DiaryWritePage() {
 
   const handleSave = async () => {
     if (!content.trim()) {
-      alert('请输入日记内容');
+      setNotice({
+        title: '内容不能为空',
+        message: '请输入日记内容后再保存。',
+        tone: 'warning',
+      });
       return;
     }
 
+    setNotice(null);
     setLoading(true);
 
     try {
-      const token = localStorage.getItem('access_token');
-      const response = await fetch('http://127.0.0.1:8000/api/diary/create', {
+      const data = await apiRequest<DiaryCreateResponse>('/api/diary/create', {
         method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${token}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
+        json: {
           diary_date: diaryDate,
           content,
           emotions: selectedEmotions.length > 0 ? selectedEmotions : null,
@@ -142,21 +177,19 @@ export default function DiaryWritePage() {
           life_dimensions: lifeDimensions,
           guided_responses: guidedAnswer ? { question: guidedQuestion, answer: guidedAnswer } : null,
           template_used: selectedTemplate,
-          writing_duration: 0,
-        }),
+          writing_duration: calculateWritingDurationMinutes(writingStartedAt),
+        },
       });
 
-      if (response.ok) {
-        const data = await response.json();
-        setAiFeedback(data.ai_feedback);
-        setShowAIFeedback(true);
-      } else {
-        const error = await response.json();
-        alert(error.detail || '保存失败');
-      }
+      setAiFeedback(normalizeDiaryAiFeedback(data?.ai_feedback));
+      setShowAIFeedback(true);
     } catch (error) {
       console.error('保存失败:', error);
-      alert('网络错误，请重试');
+      setNotice({
+        title: '保存失败',
+        message: error instanceof Error ? error.message : '网络错误，请重试',
+        tone: 'error',
+      });
     } finally {
       setLoading(false);
     }
@@ -234,7 +267,7 @@ export default function DiaryWritePage() {
               <div className="mb-6 p-6 bg-purple-50 rounded-xl">
                 <h3 className="text-lg font-semibold text-gray-800 mb-3">💡 推荐内容</h3>
                 <div className="space-y-3">
-                  {aiFeedback.recommendations.map((rec: any, index: number) => (
+                  {aiFeedback.recommendations.map((rec, index: number) => (
                     <div key={index} className="bg-white p-4 rounded-lg">
                       <div className="font-semibold text-gray-800">{rec.title}</div>
                       <div className="text-sm text-gray-600 mt-1">{rec.reason}</div>
@@ -253,11 +286,7 @@ export default function DiaryWritePage() {
               </button>
               <button
                 onClick={() => {
-                  setShowAIFeedback(false);
-                  setContent('');
-                  setSelectedEmotions([]);
-                  setEmotionTrigger('');
-                  setGuidedAnswer('');
+                  resetDiaryForm();
                 }}
                 className="flex-1 py-3 bg-gray-200 text-gray-800 font-semibold rounded-xl hover:bg-gray-300 transition-colors"
               >
@@ -287,6 +316,17 @@ export default function DiaryWritePage() {
       </nav>
 
       <div className="max-w-7xl mx-auto px-4 py-8">
+        {notice ? (
+          <div className="mb-6">
+            <StatusBanner
+              title={notice.title}
+              message={notice.message}
+              tone={notice.tone}
+              onClose={() => setNotice(null)}
+            />
+          </div>
+        ) : null}
+
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
           {/* 主编辑区 */}
           <div>

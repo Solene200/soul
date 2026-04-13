@@ -1,15 +1,11 @@
 'use client';
 
 import { useRouter } from 'next/navigation';
-import { useState, useEffect } from 'react';
+import { useState } from 'react';
 
 export default function LandingPage() {
   const router = useRouter();
-  const [isVisible, setIsVisible] = useState(false);
-
-  useEffect(() => {
-    setIsVisible(true);
-  }, []);
+  const [isVisible] = useState(true);
 
   const features = [
     {
@@ -90,7 +86,7 @@ export default function LandingPage() {
               心灵奇旅 Soul
             </h1>
             <p className="text-2xl md:text-3xl text-gray-600 mb-4">
-              你的 24/7 AI 心理健康陪伴助手
+              你的 AI 心理康复陪伴助手
             </p>
             <p className="text-lg text-gray-500 mb-12">
               隐私优先 · 本地部署 · 专业陪伴

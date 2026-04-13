@@ -2,6 +2,11 @@
 
 import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
+import { PageErrorState } from '@/components/PageErrorState';
+import { PageLoading } from '@/components/PageLoading';
+import { apiFetch, apiRequest } from '@/lib/api';
+import { hasAccessToken } from '@/lib/auth';
+import { useRequireAuth } from '@/hooks/useRequireAuth';
 
 interface HeartData {
   date: string;
@@ -28,128 +33,97 @@ interface Achievement {
   is_new: boolean;
 }
 
-interface DiaryItem {
-  diary_date: string;
-  emotions: Array<{ emotion: string; intensity: number }> | null;
-  word_count: number;
-  main_emotion: string | null;
+interface UserInfo {
+  created_at: string;
 }
-
-const EMOTION_COLORS: Record<string, string> = {
-  '快乐': '#FEF3C7',
-  '兴奋': '#FED7AA',
-  '平静': '#DBEAFE',
-  '感恩': '#E9D5FF',
-  '满足': '#D1FAE5',
-  '悲伤': '#E5E7EB',
-  '焦虑': '#FEE2E2',
-  '愤怒': '#FECACA',
-  '失落': '#E0E7FF',
-  '孤独': '#F1F5F9',
-  '压力': '#FFEDD5',
-  '恐惧': '#F3E8FF',
-};
 
 export default function GrowthPage() {
   const router = useRouter();
+  useRequireAuth();
   const [heartWall, setHeartWall] = useState<HeartData[]>([]);
   const [stats, setStats] = useState<Stats | null>(null);
   const [achievements, setAchievements] = useState<Achievement[]>([]);
-  const [diaries, setDiaries] = useState<DiaryItem[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState('');
   const [selectedYear, setSelectedYear] = useState(new Date().getFullYear());
   const [activeTab, setActiveTab] = useState<'wall' | 'achievements'>('wall');
   const [userCreatedYear, setUserCreatedYear] = useState<number>(new Date().getFullYear());
 
   useEffect(() => {
-    const token = localStorage.getItem('access_token');
-    if (!token) {
-      router.push('/login');
+    if (!hasAccessToken()) {
+      setLoading(false);
       return;
     }
 
-    fetchUserInfo();
-    fetchData();
-  }, [selectedYear]);
+    let cancelled = false;
 
-  const fetchUserInfo = async () => {
-    const token = localStorage.getItem('access_token');
-    try {
-      const res = await fetch('http://127.0.0.1:8000/api/auth/me', {
-        headers: { 'Authorization': `Bearer ${token}` }
-      });
-      if (res.ok) {
-        const userData = await res.json();
-        if (userData.created_at) {
-          const createdYear = new Date(userData.created_at).getFullYear();
-          setUserCreatedYear(createdYear);
+    const loadUserInfo = async () => {
+      try {
+        const userData = await apiRequest<UserInfo>('/api/auth/me');
+
+        if (!cancelled && userData?.created_at) {
+          setUserCreatedYear(new Date(userData.created_at).getFullYear());
         }
+      } catch (error) {
+        console.error('获取用户信息失败:', error);
       }
-    } catch (error) {
-      console.error('获取用户信息失败:', error);
-    }
-  };
+    };
 
-  const fetchData = async () => {
-    const token = localStorage.getItem('access_token');
-    
-    try {
-      // 获取爱心墙数据
-      const heartRes = await fetch(
-        `http://127.0.0.1:8000/api/growth/heart-wall?year=${selectedYear}`,
-        { headers: { 'Authorization': `Bearer ${token}` } }
-      );
-      if (heartRes.ok) {
-        const data = await heartRes.json();
-        setHeartWall(data);
-      }
+    void loadUserInfo();
 
-      // 获取统计数据
-      const statsRes = await fetch(
-        `http://127.0.0.1:8000/api/growth/stats?year=${selectedYear}`,
-        { headers: { 'Authorization': `Bearer ${token}` } }
-      );
-      if (statsRes.ok) {
-        const data = await statsRes.json();
-        setStats(data);
-      }
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
-      // 先检查新成就
-      await fetch(
-        'http://127.0.0.1:8000/api/growth/check-achievements',
-        {
-          method: 'POST',
-          headers: { 'Authorization': `Bearer ${token}` }
-        }
-      );
-
-      // 获取成就列表
-      const achievementsRes = await fetch(
-        'http://127.0.0.1:8000/api/growth/achievements',
-        { headers: { 'Authorization': `Bearer ${token}` } }
-      );
-      if (achievementsRes.ok) {
-        const data = await achievementsRes.json();
-        setAchievements(data);
-      }
-
-      // 获取日记列表（用于数据分析）
-      const startDate = `${selectedYear}-01-01`;
-      const endDate = `${selectedYear}-12-31`;
-      const diariesRes = await fetch(
-        `http://127.0.0.1:8000/api/diary/list?start_date=${startDate}&end_date=${endDate}`,
-        { headers: { 'Authorization': `Bearer ${token}` } }
-      );
-      if (diariesRes.ok) {
-        const data = await diariesRes.json();
-        setDiaries(data);
-      }
-    } catch (error) {
-      console.error('获取数据失败:', error);
-    } finally {
+  useEffect(() => {
+    if (!hasAccessToken()) {
       setLoading(false);
+      return;
     }
-  };
+
+    let cancelled = false;
+
+    const loadData = async () => {
+      setLoading(true);
+      setLoadError('');
+
+      try {
+        const [heartData, statsData] = await Promise.all([
+          apiRequest<HeartData[]>('/api/growth/heart-wall', {
+            query: { year: selectedYear },
+          }),
+          apiRequest<Stats>('/api/growth/stats', {
+            query: { year: selectedYear },
+          }),
+          apiFetch('/api/growth/check-achievements', { method: 'POST' }),
+        ]);
+
+        const achievementsData = await apiRequest<Achievement[]>('/api/growth/achievements');
+
+        if (cancelled) {
+          return;
+        }
+
+        setHeartWall(heartData ?? []);
+        setStats(statsData ?? null);
+        setAchievements(achievementsData ?? []);
+      } catch (error) {
+        console.error('获取数据失败:', error);
+        setLoadError('成长墙数据暂时无法加载，请稍后重试。');
+      } finally {
+        if (!cancelled) {
+          setLoading(false);
+        }
+      }
+    };
+
+    void loadData();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedYear]);
 
   // 生成月份分组数据
   const generateMonthlyData = () => {
@@ -205,10 +179,16 @@ export default function GrowthPage() {
   };
 
   if (loading) {
+    return <PageLoading label="加载成长数据..." tone="pink" />;
+  }
+
+  if (loadError) {
     return (
-      <div className="min-h-screen bg-gradient-to-br from-pink-50 to-purple-50 flex items-center justify-center">
-        <div className="text-xl text-gray-600">加载中...</div>
-      </div>
+      <PageErrorState
+        message={loadError}
+        actionLabel="重新加载"
+        onAction={() => window.location.reload()}
+      />
     );
   }
 
@@ -218,7 +198,7 @@ export default function GrowthPage() {
   const generateYearOptions = () => {
     const currentYear = new Date().getFullYear();
     const startYear = userCreatedYear;
-    const endYear = currentYear + 1;
+    const endYear = currentYear;
     const years = [];
     for (let year = startYear; year <= endYear; year++) {
       years.push(year);
@@ -257,7 +237,9 @@ export default function GrowthPage() {
           <div className="grid grid-cols-1 md:grid-cols-5 gap-4 mb-8">
             <div className="bg-white rounded-2xl shadow-lg p-6 text-center">
               <div className="text-4xl font-bold text-orange-500">{stats.current_streak}</div>
-              <div className="text-sm text-gray-600 mt-2">当前连胜 🔥</div>
+              <div className="text-sm text-gray-600 mt-2">
+                {selectedYear === new Date().getFullYear() ? '当前连胜 🔥' : '年末连胜 🔥'}
+              </div>
             </div>
             <div className="bg-white rounded-2xl shadow-lg p-6 text-center">
               <div className="text-4xl font-bold text-yellow-500">{stats.total_winged}</div>

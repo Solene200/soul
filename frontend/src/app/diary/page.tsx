@@ -2,6 +2,11 @@
 
 import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
+import { PageErrorState } from '@/components/PageErrorState';
+import { PageLoading } from '@/components/PageLoading';
+import { apiRequest } from '@/lib/api';
+import { hasAccessToken } from '@/lib/auth';
+import { useRequireAuth } from '@/hooks/useRequireAuth';
 
 interface DiaryItem {
   id: number;
@@ -30,39 +35,44 @@ const EMOTION_COLORS: Record<string, string> = {
 
 export default function DiaryPage() {
   const router = useRouter();
+  useRequireAuth();
   const [diaries, setDiaries] = useState<DiaryItem[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState('');
 
   useEffect(() => {
-    const token = localStorage.getItem('access_token');
-    if (!token) {
-      router.push('/login');
+    if (!hasAccessToken()) {
+      setLoading(false);
       return;
     }
 
-    fetchDiaries();
-  }, []);
+    let cancelled = false;
 
-  const fetchDiaries = async () => {
-    try {
-      const token = localStorage.getItem('access_token');
-      const response = await fetch('http://127.0.0.1:8000/api/diary/list', {
-        headers: { 'Authorization': `Bearer ${token}` },
-      });
+    const loadDiaries = async () => {
+      setLoadError('');
 
-      if (response.ok) {
-        const data = await response.json();
-        setDiaries(data);
-      } else {
-        alert('获取日记列表失败');
+      try {
+        const data = await apiRequest<DiaryItem[]>('/api/diary/list');
+
+        if (!cancelled && data) {
+          setDiaries(data);
+        }
+      } catch (error) {
+        console.error('获取日记列表失败:', error);
+        setLoadError('日记列表暂时无法加载，请稍后重试。');
+      } finally {
+        if (!cancelled) {
+          setLoading(false);
+        }
       }
-    } catch (error) {
-      console.error('获取日记列表失败:', error);
-      alert('网络错误，请重试');
-    } finally {
-      setLoading(false);
-    }
-  };
+    };
+
+    void loadDiaries();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const formatDate = (dateString: string) => {
     const date = new Date(dateString);
@@ -74,13 +84,16 @@ export default function DiaryPage() {
   };
 
   if (loading) {
+    return <PageLoading label="加载日记列表..." tone="blue" />;
+  }
+
+  if (loadError) {
     return (
-      <div className="min-h-screen bg-gradient-to-br from-blue-50 via-purple-50 to-pink-50 flex items-center justify-center">
-        <div className="text-center">
-          <div className="inline-block animate-spin rounded-full h-12 w-12 border-4 border-blue-600 border-t-transparent"></div>
-          <p className="mt-4 text-gray-600">加载中...</p>
-        </div>
-      </div>
+      <PageErrorState
+        message={loadError}
+        actionLabel="重新加载"
+        onAction={() => window.location.reload()}
+      />
     );
   }
 
@@ -117,7 +130,7 @@ export default function DiaryPage() {
         {/* 提示文字 */}
         <div className="text-center mb-8">
           <p className="text-gray-600">记录每一天的心情，留下成长的足迹</p>
-          <p className="text-sm text-gray-500 mt-1">💡 想查看数据分析？前往"数据分析"模块</p>
+          <p className="text-sm text-gray-500 mt-1">💡 想查看数据分析？前往“数据分析”模块</p>
         </div>
 
         {/* 日记列表 */}

@@ -1109,5 +1109,6 @@ async def get_assessment_trends(
         "dates": dates,
         "scores": scores,
         "levels": levels,
-        "count": len(records)
+        "count": len(records),
+        "max_score": template.scoring_rules.get("max_score") if isinstance(template.scoring_rules, dict) else None
     }

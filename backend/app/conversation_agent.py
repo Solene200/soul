@@ -1,11 +1,14 @@
 """对话智能体 - 根据阶段生成回复"""
+import os
 from typing import List, Dict
 import ollama
+
+LOCAL_MODEL_NAME = os.getenv("OLLAMA_MODEL", "qwen3:1.7b")
 
 class ConversationAgent:
     """对话代理：根据会话阶段调整回复风格"""
     
-    def __init__(self, model: str = "Ethanwhh/Qwen3-4B-soul"):
+    def __init__(self, model: str = LOCAL_MODEL_NAME):
         self.model = model
         self.client = ollama.AsyncClient()
         

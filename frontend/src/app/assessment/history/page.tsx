@@ -2,6 +2,11 @@
 
 import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
+import { PageErrorState } from '@/components/PageErrorState';
+import { PageLoading } from '@/components/PageLoading';
+import { apiRequest } from '@/lib/api';
+import { hasAccessToken } from '@/lib/auth';
+import { useRequireAuth } from '@/hooks/useRequireAuth';
 
 interface HistoryItem {
   id: number;
@@ -24,53 +29,62 @@ const RISK_LEVEL_CONFIG: Record<string, { color: string; bg: string; emoji: stri
 
 export default function AssessmentHistoryPage() {
   const router = useRouter();
+  useRequireAuth();
   const [history, setHistory] = useState<HistoryItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [selectedScale, setSelectedScale] = useState<string | null>(null);
+  const [availableScales, setAvailableScales] = useState<string[]>([]);
+  const [loadError, setLoadError] = useState('');
 
   useEffect(() => {
-    const token = localStorage.getItem('access_token');
-    if (!token) {
-      router.push('/login');
+    if (!hasAccessToken()) {
+      setLoading(false);
       return;
     }
 
-    fetchHistory();
-  }, [router, selectedScale]);
+    let cancelled = false;
 
-  const fetchHistory = async () => {
-    try {
-      const token = localStorage.getItem('access_token');
-      const url = selectedScale
-        ? `http://127.0.0.1:8000/api/assessments/history?scale_name=${selectedScale}`
-        : 'http://127.0.0.1:8000/api/assessments/history';
+    const loadHistory = async () => {
+      setLoadError('');
 
-      const response = await fetch(url, {
-        headers: {
-          'Authorization': `Bearer ${token}`,
-        },
-      });
+      try {
+        const data = await apiRequest<HistoryItem[]>('/api/assessments/history', {
+          query: selectedScale ? { scale_name: selectedScale } : undefined,
+        });
 
-      if (response.ok) {
-        const data = await response.json();
+        if (cancelled || !data) {
+          return;
+        }
+
         setHistory(data);
-      } else {
-        alert('获取历史记录失败');
+        setAvailableScales((previous) =>
+          previous.length > 0 && selectedScale
+            ? previous
+            : Array.from(new Set(data.map((item) => item.scale_name)))
+        );
+      } catch (error) {
+        console.error('获取历史记录失败:', error);
+        setLoadError('评估历史暂时无法加载，请稍后重试。');
+      } finally {
+        if (!cancelled) {
+          setLoading(false);
+        }
       }
-    } catch (error) {
-      console.error('获取历史记录失败:', error);
-      alert('网络错误，请重试');
-    } finally {
-      setLoading(false);
-    }
-  };
+    };
+
+    void loadHistory();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedScale]);
 
   const viewResult = (id: number) => {
     router.push(`/assessment/result/${id}`);
   };
 
   // 获取所有独特的量表类型
-  const uniqueScales = Array.from(new Set(history.map((item) => item.scale_name)));
+  const uniqueScales = availableScales;
 
   // 按日期分组
   const groupedHistory: Record<string, HistoryItem[]> = {};
@@ -155,10 +169,13 @@ export default function AssessmentHistoryPage() {
 
         {/* 历史记录列表 */}
         {loading ? (
-          <div className="text-center py-20">
-            <div className="inline-block animate-spin rounded-full h-12 w-12 border-4 border-purple-600 border-t-transparent"></div>
-            <p className="mt-4 text-gray-600">加载中...</p>
-          </div>
+          <PageLoading label="加载评估历史..." tone="purple" />
+        ) : loadError ? (
+          <PageErrorState
+            message={loadError}
+            actionLabel="重新加载"
+            onAction={() => window.location.reload()}
+          />
         ) : history.length === 0 ? (
           <div className="text-center py-20">
             <div className="text-6xl mb-4">📭</div>

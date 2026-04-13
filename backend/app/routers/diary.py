@@ -1,4 +1,5 @@
 """情绪日记路由"""
+import os
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from sqlalchemy import func, and_, desc
@@ -16,6 +17,7 @@ from ..schemas import (
 from ..auth import get_current_user
 
 router = APIRouter(prefix="/api/diary", tags=["diary"])
+LOCAL_MODEL_NAME = os.getenv("OLLAMA_MODEL", "qwen3:1.7b")
 
 
 @router.post("/create", response_model=DiaryResponse)
@@ -372,7 +374,7 @@ async def generate_ai_feedback_with_ollama(content: str, emotions: Optional[List
         # 调用 Ollama 模型
         client = ollama.Client()
         response = client.chat(
-            model="Ethanwhh/Qwen3-4B-soul",
+            model=LOCAL_MODEL_NAME,
             messages=[{"role": "user", "content": prompt}],
             format="json"
         )

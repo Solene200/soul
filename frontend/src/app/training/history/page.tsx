@@ -2,6 +2,11 @@
 
 import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
+import { PageErrorState } from '@/components/PageErrorState';
+import { PageLoading } from '@/components/PageLoading';
+import { apiRequest } from '@/lib/api';
+import { hasAccessToken } from '@/lib/auth';
+import { useRequireAuth } from '@/hooks/useRequireAuth';
 
 interface TrainingRecord {
   id: number;
@@ -26,10 +31,12 @@ interface TrainingStats {
 
 export default function TrainingHistoryPage() {
   const router = useRouter();
+  useRequireAuth();
   const [records, setRecords] = useState<TrainingRecord[]>([]);
   const [stats, setStats] = useState<TrainingStats | null>(null);
   const [loading, setLoading] = useState(true);
   const [filterType, setFilterType] = useState<string>('all');
+  const [loadError, setLoadError] = useState('');
 
   const typeLabels: { [key: string]: string } = {
     breathing: '呼吸训练',
@@ -50,44 +57,44 @@ export default function TrainingHistoryPage() {
   };
 
   useEffect(() => {
-    const token = localStorage.getItem('access_token');
-    if (!token) {
-      router.push('/login');
+    if (!hasAccessToken()) {
+      setLoading(false);
       return;
     }
 
-    fetchData();
-  }, []);
+    let cancelled = false;
 
-  const fetchData = async () => {
-    try {
-      const token = localStorage.getItem('access_token');
-      
-      const [recordsRes, statsRes] = await Promise.all([
-        fetch('http://127.0.0.1:8000/api/training/records', {
-          headers: { 'Authorization': `Bearer ${token}` },
-        }),
-        fetch('http://127.0.0.1:8000/api/training/statistics', {
-          headers: { 'Authorization': `Bearer ${token}` },
-        }),
-      ]);
+    const loadData = async () => {
+      setLoadError('');
 
-      if (recordsRes.ok && statsRes.ok) {
-        const recordsData = await recordsRes.json();
-        const statsData = await statsRes.json();
-        setRecords(recordsData);
-        setStats(statsData);
-      } else {
-        console.error('获取数据失败');
-        alert('获取数据失败，请重试');
+      try {
+        const [recordsData, statsData] = await Promise.all([
+          apiRequest<TrainingRecord[]>('/api/training/records'),
+          apiRequest<TrainingStats>('/api/training/statistics'),
+        ]);
+
+        if (cancelled) {
+          return;
+        }
+
+        setRecords(recordsData ?? []);
+        setStats(statsData ?? null);
+      } catch (error) {
+        console.error('获取数据失败:', error);
+        setLoadError('训练历史暂时无法加载，请稍后重试。');
+      } finally {
+        if (!cancelled) {
+          setLoading(false);
+        }
       }
-    } catch (error) {
-      console.error('获取数据失败:', error);
-      alert('网络错误，请重试');
-    } finally {
-      setLoading(false);
-    }
-  };
+    };
+
+    void loadData();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const formatDate = (dateString: string) => {
     const date = new Date(dateString);
@@ -105,13 +112,16 @@ export default function TrainingHistoryPage() {
     : records.filter(r => r.training_type === filterType);
 
   if (loading) {
+    return <PageLoading label="加载训练历史..." tone="blue" />;
+  }
+
+  if (loadError) {
     return (
-      <div className="min-h-screen bg-gradient-to-br from-blue-50 via-purple-50 to-pink-50 flex items-center justify-center">
-        <div className="text-center">
-          <div className="inline-block animate-spin rounded-full h-12 w-12 border-4 border-blue-600 border-t-transparent"></div>
-          <p className="mt-4 text-gray-600">加载中...</p>
-        </div>
-      </div>
+      <PageErrorState
+        message={loadError}
+        actionLabel="重新加载"
+        onAction={() => window.location.reload()}
+      />
     );
   }
 

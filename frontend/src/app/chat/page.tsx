@@ -1,256 +1,346 @@
 'use client';
 
-import { useState, useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import { ConfirmDialog } from '@/components/ConfirmDialog';
+import { StatusBanner } from '@/components/StatusBanner';
+import { apiFetch, apiRequest } from '@/lib/api';
+import { hasAccessToken } from '@/lib/auth';
+import {
+  createChatStreamParser,
+  DEFAULT_CONVERSATION_META,
+  type ActiveConversationResponse,
+  type ChatMessage as Message,
+  type ConversationMeta,
+} from '@/lib/chat';
+import { useRequireAuth } from '@/hooks/useRequireAuth';
 
-interface Message {
-  id: number;
-  role: 'user' | 'assistant' | 'system';
-  content: string;
-  created_at: string;
-  phase?: string;
-  isResolution?: boolean;
-  isCrisis?: boolean;
-}
-
-interface ConversationMeta {
-  conversation_id: number | null;
-  phase: 'emotional' | 'rational' | 'solution';
-  round_count: number;
-  is_privacy: boolean;
-  is_complex: boolean;
+interface ChatNotice {
+  title?: string;
+  message: string;
+  tone: 'info' | 'success' | 'warning' | 'error';
 }
 
 export default function ChatPage() {
   const router = useRouter();
+  useRequireAuth();
+
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
-  const [isClearing, setIsClearing] = useState(false); // 添加清空状态标志
-  const [conversationMeta, setConversationMeta] = useState<ConversationMeta>({
-    conversation_id: null,
-    phase: 'emotional',
-    round_count: 0,
-    is_privacy: false,
-    is_complex: false,
-  });
+  const [isClearing, setIsClearing] = useState(false);
+  const [notice, setNotice] = useState<ChatNotice | null>(null);
+  const [showClearDialog, setShowClearDialog] = useState(false);
+  const [conversationMeta, setConversationMeta] =
+    useState<ConversationMeta>(DEFAULT_CONVERSATION_META);
+
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const activeRequestControllerRef = useRef<AbortController | null>(null);
+  const clearTimeoutRef = useRef<number | null>(null);
+  const abortReasonRef = useRef<'idle' | 'cancel' | 'clear'>('idle');
 
   useEffect(() => {
-    const token = localStorage.getItem('access_token');
-    if (!token) {
-      router.push('/login');
+    if (!hasAccessToken()) {
+      return;
     }
-  }, [router]);
+
+    let cancelled = false;
+
+    const restoreConversation = async () => {
+      try {
+        const data = await apiRequest<ActiveConversationResponse>('/api/chat/active');
+
+        if (cancelled || !data) {
+          return;
+        }
+
+        setConversationMeta({
+          ...DEFAULT_CONVERSATION_META,
+          conversation_id: data.conversation_id,
+          phase: data.phase ?? DEFAULT_CONVERSATION_META.phase,
+          round_count: data.round_count,
+          is_privacy: data.is_privacy ?? false,
+          is_complex: data.is_complex ?? false,
+        });
+        setMessages(data.messages ?? []);
+      } catch (error) {
+        console.error('恢复会话失败:', error);
+      }
+    };
+
+    void restoreConversation();
+
+    return () => {
+      cancelled = true;
+      activeRequestControllerRef.current?.abort();
+
+      if (clearTimeoutRef.current) {
+        window.clearTimeout(clearTimeoutRef.current);
+      }
+    };
+  }, []);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
+  const resetConversationState = () => {
+    setMessages([]);
+    setConversationMeta(DEFAULT_CONVERSATION_META);
+  };
+
+  const cancelCurrentResponse = () => {
+    abortReasonRef.current = 'cancel';
+    activeRequestControllerRef.current?.abort();
+  };
+
   const sendMessage = async () => {
-    if (!input.trim() || loading || isClearing) return; // 清空中禁止发送
+    if (!input.trim() || loading || isClearing) {
+      return;
+    }
+
+    setNotice(null);
 
     const userMessage = input.trim();
+    const userMessageId = Date.now();
+    const assistantMessageId = userMessageId + 1;
+
     setInput('');
     setLoading(true);
+    setMessages((prev) => [
+      ...prev,
+      {
+        id: userMessageId,
+        role: 'user',
+        content: userMessage,
+        created_at: new Date().toISOString(),
+      },
+    ]);
 
-    const tempUserMsg: Message = {
-      id: Date.now(),
-      role: 'user',
-      content: userMessage,
-      created_at: new Date().toISOString(),
-    };
-    setMessages(prev => [...prev, tempUserMsg]);
+    const controller = new AbortController();
+    activeRequestControllerRef.current = controller;
 
     try {
-      const token = localStorage.getItem('access_token');
-      const response = await fetch('http://127.0.0.1:8000/api/chat/send', {
+      const response = await apiFetch('/api/chat/send', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${token}`,
-        },
-        body: JSON.stringify({
+        json: {
           message: userMessage,
           conversation_id: conversationMeta.conversation_id,
-        }),
+        },
+        signal: controller.signal,
       });
 
-      if (!response.ok) {
-        throw new Error('发送失败');
+      const reader = response.body?.getReader();
+      if (!reader) {
+        throw new Error('未收到流式响应');
       }
 
-      const reader = response.body?.getReader();
       const decoder = new TextDecoder();
       let aiResponse = '';
-      let currentMsgId = Date.now() + 1;
+      let streamEnded = false;
 
-      if (reader) {
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-
-          const chunk = decoder.decode(value);
-          const lines = chunk.split('\n');
-
-          for (const line of lines) {
-            if (line.startsWith('data: ')) {
-              try {
-                const data = JSON.parse(line.slice(6));
-                
-                if (data.type === 'metadata') {
-                  setConversationMeta({
-                    conversation_id: data.conversation_id,
-                    phase: data.phase,
-                    round_count: data.round_count,
-                    is_privacy: data.is_privacy,
-                    is_complex: data.is_complex,
-                  });
-                  
-                  const tempAiMsg: Message = {
-                    id: currentMsgId,
-                    role: 'assistant',
-                    content: '',
-                    created_at: new Date().toISOString(),
-                    phase: data.phase,
-                  };
-                  setMessages(prev => [...prev, tempAiMsg]);
-                  
-                } else if (data.type === 'chunk') {
-                  aiResponse += data.content;
-                  setMessages(prev => {
-                    const newMessages = [...prev];
-                    const lastMsg = newMessages[newMessages.length - 1];
-                    if (lastMsg && lastMsg.role === 'assistant') {
-                      lastMsg.content = aiResponse;
-                    }
-                    return newMessages;
-                  });
-                  
-                } else if (data.type === 'crisis') {
-                  const crisisMsg: Message = {
-                    id: currentMsgId,
-                    role: 'system',
-                    content: data.content,
-                    created_at: new Date().toISOString(),
-                    isCrisis: true,
-                  };
-                  setMessages(prev => [...prev, crisisMsg]);
-                  
-                } else if (data.type === 'end') {
-                  break;
-                }
-              } catch (e) {
-                // 静默忽略解析错误
+      const parser = createChatStreamParser((event) => {
+        switch (event.type) {
+          case 'metadata':
+            setConversationMeta({
+              conversation_id: event.conversation_id,
+              phase: event.phase,
+              round_count: event.round_count,
+              is_privacy: event.is_privacy,
+              is_complex: event.is_complex,
+            });
+            setMessages((prev) => {
+              if (prev.some((message) => message.id === assistantMessageId)) {
+                return prev;
               }
-            }
-          }
+
+              return [
+                ...prev,
+                {
+                  id: assistantMessageId,
+                  role: 'assistant',
+                  content: '',
+                  created_at: new Date().toISOString(),
+                  phase: event.phase,
+                },
+              ];
+            });
+            break;
+          case 'chunk':
+            aiResponse += event.content;
+            setMessages((prev) =>
+              prev.map((message) =>
+                message.id === assistantMessageId
+                  ? { ...message, content: aiResponse }
+                  : message
+              )
+            );
+            break;
+          case 'crisis':
+            setMessages((prev) => [
+              ...prev,
+              {
+                id: Date.now(),
+                role: 'system',
+                content: event.content,
+                created_at: new Date().toISOString(),
+                isCrisis: true,
+              },
+            ]);
+            break;
+          case 'error':
+            throw new Error(event.content);
+          case 'end':
+            streamEnded = true;
+            break;
+        }
+      });
+
+      while (true) {
+        const { done, value } = await reader.read();
+
+        if (done) {
+          break;
+        }
+
+        parser.push(decoder.decode(value, { stream: true }));
+
+        if (streamEnded) {
+          break;
         }
       }
-    } catch (error: any) {
-      alert('发送失败：' + error.message);
-      setMessages(prev => prev.slice(0, -1));
+
+      parser.push(decoder.decode());
+      parser.flush();
+    } catch (error: unknown) {
+      if (error instanceof DOMException && error.name === 'AbortError') {
+        if (abortReasonRef.current === 'cancel') {
+          setMessages((prev) => [
+            ...prev,
+            {
+              id: Date.now(),
+              role: 'system',
+              content: '本次回答已停止，你可以继续追问或重新发送。',
+              created_at: new Date().toISOString(),
+            },
+          ]);
+        }
+      } else {
+        const message = error instanceof Error ? error.message : '未知错误';
+        setNotice({
+          title: '发送失败',
+          message,
+          tone: 'error',
+        });
+        setMessages((prev) =>
+          prev.filter(
+            (messageItem) =>
+              messageItem.id !== userMessageId && messageItem.id !== assistantMessageId
+          )
+        );
+      }
     } finally {
+      abortReasonRef.current = 'idle';
+      activeRequestControllerRef.current = null;
       setLoading(false);
     }
   };
 
-  const clearChat = async () => {
-    if (!confirm('确定要清空对话吗？')) return;
-    
-    // 设置清空状态，防止在清空过程中发送消息
+  const confirmClearChat = async () => {
+    setShowClearDialog(false);
+    setNotice(null);
     setIsClearing(true);
+    abortReasonRef.current = 'clear';
+    activeRequestControllerRef.current?.abort();
 
     try {
-      const token = localStorage.getItem('access_token');
-      const response = await fetch('http://127.0.0.1:8000/api/chat/clear', {
-        method: 'DELETE',
-        headers: {
-          'Authorization': `Bearer ${token}`,
-        },
-      });
+      const data = await apiRequest<{ success: boolean; message: string }>(
+        '/api/chat/clear',
+        {
+          method: 'DELETE',
+        }
+      );
 
-      const data = await response.json();
-      
-      // 显示温暖的结束语
-      if (data.success && data.message) {
-        const farewell: Message = {
-          id: Date.now(),
-          role: 'assistant',
-          content: data.message,
-          created_at: new Date().toISOString(),
-          isResolution: true,
-        };
-        setMessages(prev => [...prev, farewell]);
-        
-        // 3秒后清空（使用独立的清空逻辑）
-        setTimeout(() => {
-          setMessages([]);
-          setConversationMeta({
-            conversation_id: null,
-            phase: 'emotional',
-            round_count: 0,
-            is_privacy: false,
-            is_complex: false,
-          });
-          setIsClearing(false); // 清空完成
+      if (data?.success && data.message) {
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: Date.now(),
+            role: 'assistant',
+            content: data.message,
+            created_at: new Date().toISOString(),
+            isResolution: true,
+          },
+        ]);
+
+        clearTimeoutRef.current = window.setTimeout(() => {
+          resetConversationState();
+          setIsClearing(false);
+          clearTimeoutRef.current = null;
         }, 3000);
       } else {
-        // 如果没有返回消息，直接清空
-        setMessages([]);
-        setConversationMeta({
-          conversation_id: null,
-          phase: 'emotional',
-          round_count: 0,
-          is_privacy: false,
-          is_complex: false,
-        });
+        resetConversationState();
         setIsClearing(false);
       }
     } catch (error) {
-      alert('清空失败');
+      console.error('清空失败:', error);
+      setNotice({
+        title: '清空失败',
+        message: '当前对话暂时无法清空，请稍后重试。',
+        tone: 'error',
+      });
       setIsClearing(false);
     }
   };
 
   return (
-    <div className="flex flex-col h-screen bg-gradient-to-br from-pink-50 via-purple-50 to-blue-50">
-      {/* 顶部导航 */}
-      <nav className="bg-white/80 backdrop-blur-md shadow-sm px-6 py-4">
-        <div className="max-w-4xl mx-auto flex items-center justify-between">
+    <div className="flex h-screen flex-col bg-gradient-to-br from-pink-50 via-purple-50 to-blue-50">
+      <nav className="bg-white/80 px-6 py-4 shadow-sm backdrop-blur-md">
+        <div className="mx-auto flex max-w-4xl items-center justify-between">
           <div className="flex items-center gap-4">
             <button
               onClick={() => router.push('/dashboard')}
-              className="text-gray-600 hover:text-gray-800 transition-colors"
+              className="text-gray-600 transition-colors hover:text-gray-800"
             >
               ← 返回
             </button>
             <div className="flex items-center gap-2">
               <span className="text-2xl">🤖</span>
-              <span className="text-xl font-bold bg-gradient-to-r from-pink-500 to-purple-600 bg-clip-text text-transparent">
+              <span className="bg-gradient-to-r from-pink-500 to-purple-600 bg-clip-text text-xl font-bold text-transparent">
                 智能对话
               </span>
             </div>
           </div>
           <button
-            onClick={clearChat}
-            className="px-4 py-2 text-sm text-gray-600 hover:text-gray-800 transition-colors"
+            onClick={() => setShowClearDialog(true)}
+            disabled={isClearing || messages.length === 0}
+            className="px-4 py-2 text-sm text-gray-600 transition-colors hover:text-gray-800 disabled:cursor-not-allowed disabled:opacity-50"
           >
             清空对话
           </button>
         </div>
       </nav>
 
-      {/* 消息区域 */}
       <div className="flex-1 overflow-y-auto px-4 py-6">
-        <div className="max-w-4xl mx-auto space-y-4">
+        <div className="mx-auto max-w-4xl space-y-4">
+          {notice ? (
+            <StatusBanner
+              title={notice.title}
+              message={notice.message}
+              tone={notice.tone}
+              onClose={() => setNotice(null)}
+            />
+          ) : null}
+
           {messages.length === 0 && (
-            <div className="text-center py-20">
-              <div className="text-6xl mb-4">💭</div>
-              <p className="text-gray-600 text-lg">我是心灵奇旅，你的 24 小时心理陪伴助手</p>
-              <p className="text-gray-400 text-sm mt-2">无论你遇到什么困扰，我都会倾听并陪你一起面对</p>
+            <div className="py-20 text-center">
+              <div className="mb-4 text-6xl">💭</div>
+              <p className="text-lg text-gray-600">我是心灵奇旅，你的 24 小时心理陪伴助手</p>
+              <p className="mt-2 text-sm text-gray-400">
+                无论你遇到什么困扰，我都会倾听并陪你一起面对
+              </p>
             </div>
           )}
 
@@ -260,23 +350,25 @@ export default function ChatPage() {
               className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}
             >
               {msg.role === 'system' && msg.isCrisis ? (
-                <div className="w-full max-w-[90%] rounded-2xl px-6 py-4 bg-red-50 border-2 border-red-300">
+                <div className="w-full max-w-[90%] rounded-2xl border-2 border-red-300 bg-red-50 px-6 py-4">
                   <div className="flex items-start gap-3">
                     <span className="text-3xl">🆘</span>
                     <div className="flex-1">
-                      <div className="font-bold text-red-800 mb-2">检测到危机信号</div>
-                      <div className="text-red-700 whitespace-pre-wrap">{msg.content}</div>
+                      <div className="mb-2 font-bold text-red-800">检测到危机信号</div>
+                      <div className="whitespace-pre-wrap text-red-700">{msg.content}</div>
                     </div>
                   </div>
                 </div>
               ) : msg.isResolution ? (
-                <div className="w-full max-w-[90%] rounded-2xl px-6 py-4 bg-gradient-to-r from-green-50 to-blue-50 border-2 border-green-300">
+                <div className="w-full max-w-[90%] rounded-2xl border-2 border-green-300 bg-gradient-to-r from-green-50 to-blue-50 px-6 py-4">
                   <div className="flex items-start gap-3">
                     <span className="text-3xl">✨</span>
                     <div className="flex-1">
-                      <div className="font-bold text-green-800 mb-2">问题已解决</div>
-                      <div className="text-green-700 whitespace-pre-wrap">{msg.content}</div>
-                      <div className="text-sm text-green-600 mt-2">对话将在 3 秒后自动清空...</div>
+                      <div className="mb-2 font-bold text-green-800">问题已解决</div>
+                      <div className="whitespace-pre-wrap text-green-700">{msg.content}</div>
+                      <div className="mt-2 text-sm text-green-600">
+                        对话将在 3 秒后自动清空...
+                      </div>
                     </div>
                   </div>
                 </div>
@@ -285,13 +377,13 @@ export default function ChatPage() {
                   className={`max-w-[70%] rounded-2xl px-6 py-4 ${
                     msg.role === 'user'
                       ? 'bg-gradient-to-r from-pink-500 to-purple-600 text-white'
-                      : 'bg-white shadow-md text-gray-800'
+                      : 'bg-white text-gray-800 shadow-md'
                   }`}
                 >
                   {msg.role === 'user' ? (
                     <p className="whitespace-pre-wrap">{msg.content}</p>
                   ) : msg.content ? (
-                    <div className="prose prose-sm max-w-none prose-headings:mt-3 prose-headings:mb-2 prose-p:my-2 prose-ul:my-2 prose-ol:my-2 prose-li:my-1 prose-code:bg-gray-100 prose-code:px-1 prose-code:py-0.5 prose-code:rounded prose-pre:bg-gray-100 prose-pre:border prose-pre:border-gray-300">
+                    <div className="prose prose-sm max-w-none prose-headings:mb-2 prose-headings:mt-3 prose-li:my-1 prose-ol:my-2 prose-p:my-2 prose-pre:border prose-pre:border-gray-300 prose-pre:bg-gray-100 prose-ul:my-2 prose-code:rounded prose-code:bg-gray-100 prose-code:px-1 prose-code:py-0.5">
                       <ReactMarkdown remarkPlugins={[remarkGfm]}>
                         {msg.content}
                       </ReactMarkdown>
@@ -307,32 +399,45 @@ export default function ChatPage() {
         </div>
       </div>
 
-      {/* 输入区域 */}
-      <div className="bg-white border-t border-gray-200 px-4 py-4">
-        <div className="max-w-4xl mx-auto flex gap-3">
+      <div className="border-t border-gray-200 bg-white px-4 py-4">
+        <div className="mx-auto flex max-w-4xl gap-3">
           <textarea
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={(e) => {
               if (e.key === 'Enter' && !e.shiftKey && !isClearing) {
                 e.preventDefault();
-                sendMessage();
+                void sendMessage();
               }
             }}
-            placeholder={isClearing ? "清空中，请稍候..." : "说说你的感受..."}
+            placeholder={isClearing ? '清空中，请稍候...' : '说说你的感受...'}
             disabled={loading || isClearing}
-            className="flex-1 px-4 py-3 border border-gray-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-purple-500 focus:border-transparent resize-none disabled:bg-gray-100"
+            className="flex-1 resize-none rounded-xl border border-gray-300 px-4 py-3 focus:border-transparent focus:outline-none focus:ring-2 focus:ring-purple-500 disabled:bg-gray-100"
             rows={3}
           />
           <button
-            onClick={sendMessage}
-            disabled={loading || !input.trim() || isClearing}
-            className="px-8 py-3 bg-gradient-to-r from-pink-500 to-purple-600 text-white rounded-xl font-semibold hover:shadow-lg transform hover:scale-105 transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed disabled:transform-none"
+            onClick={loading ? cancelCurrentResponse : sendMessage}
+            disabled={isClearing || (!loading && !input.trim())}
+            className="transform rounded-xl bg-gradient-to-r from-pink-500 to-purple-600 px-8 py-3 font-semibold text-white transition-all duration-200 hover:scale-105 hover:shadow-lg disabled:cursor-not-allowed disabled:transform-none disabled:opacity-50"
           >
-            {loading ? '发送中...' : isClearing ? '清空中...' : '发送'}
+            {loading ? '停止回复' : isClearing ? '清空中...' : '发送'}
           </button>
         </div>
       </div>
+
+      <ConfirmDialog
+        open={showClearDialog}
+        title="清空当前对话"
+        description="清空后会结束当前会话，已有上下文也会一起移除。确认继续吗？"
+        confirmText={isClearing ? '清空中...' : '确认清空'}
+        cancelText="继续对话"
+        confirmTone="danger"
+        pending={isClearing}
+        onConfirm={() => {
+          void confirmClearChat();
+        }}
+        onCancel={() => setShowClearDialog(false)}
+      />
     </div>
   );
 }

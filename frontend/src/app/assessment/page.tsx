@@ -2,6 +2,11 @@
 
 import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
+import { PageErrorState } from '@/components/PageErrorState';
+import { PageLoading } from '@/components/PageLoading';
+import { apiRequest } from '@/lib/api';
+import { hasAccessToken } from '@/lib/auth';
+import { useRequireAuth } from '@/hooks/useRequireAuth';
 
 interface AssessmentTemplate {
   id: number;
@@ -26,46 +31,47 @@ const CATEGORY_INFO: Record<string, { name: string; color: string; emoji: string
 
 export default function AssessmentPage() {
   const router = useRouter();
+  useRequireAuth();
   const [assessments, setAssessments] = useState<AssessmentTemplate[]>([]);
   const [loading, setLoading] = useState(true);
   const [selectedCategory, setSelectedCategory] = useState<string | null>(null);
+  const [loadError, setLoadError] = useState('');
 
   useEffect(() => {
-    const token = localStorage.getItem('access_token');
-    if (!token) {
-      router.push('/login');
+    if (!hasAccessToken()) {
+      setLoading(false);
       return;
     }
-    
-    fetchAssessments();
-  }, [router, selectedCategory]);
 
-  const fetchAssessments = async () => {
-    try {
-      const token = localStorage.getItem('access_token');
-      const url = selectedCategory
-        ? `http://127.0.0.1:8000/api/assessments/list?category=${selectedCategory}`
-        : 'http://127.0.0.1:8000/api/assessments/list';
-      
-      const response = await fetch(url, {
-        headers: {
-          'Authorization': `Bearer ${token}`,
-        },
-      });
+    let cancelled = false;
 
-      if (response.ok) {
-        const data = await response.json();
-        setAssessments(data);
-      } else {
-        alert('获取评估列表失败');
+    const loadAssessments = async () => {
+      setLoadError('');
+
+      try {
+        const data = await apiRequest<AssessmentTemplate[]>('/api/assessments/list', {
+          query: selectedCategory ? { category: selectedCategory } : undefined,
+        });
+
+        if (!cancelled && data) {
+          setAssessments(data);
+        }
+      } catch (error) {
+        console.error('获取评估列表失败:', error);
+        setLoadError('评估列表暂时无法加载，请稍后重试。');
+      } finally {
+        if (!cancelled) {
+          setLoading(false);
+        }
       }
-    } catch (error) {
-      console.error('获取评估列表失败:', error);
-      alert('网络错误，请重试');
-    } finally {
-      setLoading(false);
-    }
-  };
+    };
+
+    void loadAssessments();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedCategory]);
 
   const startAssessment = (id: number) => {
     router.push(`/assessment/${id}`);
@@ -141,10 +147,13 @@ export default function AssessmentPage() {
 
         {/* 评估卡片列表 */}
         {loading ? (
-          <div className="text-center py-20">
-            <div className="inline-block animate-spin rounded-full h-12 w-12 border-4 border-purple-600 border-t-transparent"></div>
-            <p className="mt-4 text-gray-600">加载中...</p>
-          </div>
+          <PageLoading label="加载评估列表..." tone="purple" />
+        ) : loadError ? (
+          <PageErrorState
+            message={loadError}
+            actionLabel="重新加载"
+            onAction={() => window.location.reload()}
+          />
         ) : assessments.length === 0 ? (
           <div className="text-center py-20">
             <div className="text-6xl mb-4">🔍</div>
@@ -153,7 +162,6 @@ export default function AssessmentPage() {
         ) : (
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
             {assessments.map((assessment) => {
-              const categoryInfo = CATEGORY_INFO[assessment.category];
               return (
                 <div
                   key={assessment.id}

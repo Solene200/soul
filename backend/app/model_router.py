@@ -6,13 +6,35 @@ import ollama
 import httpx
 
 logger = logging.getLogger(__name__)
+LOCAL_MODEL_NAME = os.getenv("OLLAMA_MODEL", "qwen3:1.7b")
+REMOTE_MODEL_NAME = os.getenv(
+    "MODELSCOPE_MODEL_NAME",
+    "Qwen/Qwen3-Next-80B-A3B-Instruct",
+)
 
 class LocalModelService:
     """本地模型服务（Ollama）"""
     
-    def __init__(self, model: str = "Ethanwhh/Qwen3-4B-soul"):
+    def __init__(self, model: str = LOCAL_MODEL_NAME):
         self.model = model
         self.client = ollama.AsyncClient()
+
+    def _build_fallback_response(self, user_input: str) -> str:
+        """当本地模型不可用时，提供一个温和的兜底回复。"""
+        summary = user_input.strip()
+        if len(summary) > 60:
+            summary = f"{summary[:57]}..."
+
+        return (
+            "我已经收到了你的消息。当前本地模型服务暂时不可用，"
+            "所以我先用降级模式陪你梳理一下。\n\n"
+            f"你刚刚提到的是：{summary or '你的近况'}。\n"
+            "如果你愿意，可以继续补充三件事中的任意一件：\n"
+            "1. 这件事最让你难受的点是什么\n"
+            "2. 你现在最强烈的情绪是什么\n"
+            "3. 你更想先被安慰，还是先一起想办法\n\n"
+            "等本地模型服务恢复后，我也可以继续更深入地陪你聊。"
+        )
     
     async def generate_with_prompt(self, system_prompt, user_input, conversation_history, stream=True):
         """生成响应"""
@@ -41,7 +63,8 @@ class LocalModelService:
                 )
                 yield response['message']['content']
         except Exception as e:
-            yield f"[错误] 本地模型调用失败: {str(e)}"
+            logger.warning("本地模型不可用，已回退到降级回复: %s", e)
+            yield self._build_fallback_response(user_input)
 
 
 class RemoteModelService:
@@ -53,7 +76,7 @@ class RemoteModelService:
     def __init__(self):
         # 从环境变量读取 API Key
         self.api_key = os.getenv("MODELSCOPE_API_KEY", "")
-        self.model_name = "Qwen/Qwen3-Next-80B-A3B-Instruct"
+        self.model_name = REMOTE_MODEL_NAME
         # ModelScope 官方推理 API
         self.base_url = "https://api-inference.modelscope.cn/v1/chat/completions"
     
@@ -165,7 +188,7 @@ class ModelRouter:
     """
     
     def __init__(self):
-        self.local_service = LocalModelService(model="Ethanwhh/Qwen3-4B-soul")
+        self.local_service = LocalModelService(model=LOCAL_MODEL_NAME)
         self.remote_service = RemoteModelService()
     
     def get_model_service(
@@ -178,8 +201,8 @@ class ModelRouter:
         
         路由逻辑：
         1. 隐私问题 → 强制使用本地模型（保护隐私）
-        2. 复杂问题 → 使用云端大模型（Qwen3-Next-80B）
-        3. 简单问答 → 使用本地模型（Qwen3-4B）
+        2. 复杂问题 → 使用云端大模型
+        3. 简单问答 → 使用本地模型
         
         :param is_privacy_issue: 是否为隐私问题
         :param is_complex_issue: 是否为复杂问题
@@ -202,11 +225,11 @@ class ModelRouter:
     ) -> str:
         """返回模型名称（用于日志记录）"""
         if is_privacy_issue:
-            return "local-Qwen3-4B"
+            return f"local-{LOCAL_MODEL_NAME}"
         elif is_complex_issue:
-            return "remote-Qwen3-Next-80B"
+            return f"remote-{REMOTE_MODEL_NAME}"
         else:
-            return "local-Qwen3-4B"
+            return f"local-{LOCAL_MODEL_NAME}"
 
 
 # 全局路由器实例

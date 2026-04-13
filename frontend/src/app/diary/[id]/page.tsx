@@ -2,28 +2,42 @@
 
 import { useState, useEffect } from 'react';
 import { useRouter, useParams } from 'next/navigation';
+import { ConfirmDialog } from '@/components/ConfirmDialog';
+import { PageErrorState } from '@/components/PageErrorState';
+import { PageLoading } from '@/components/PageLoading';
+import { StatusBanner } from '@/components/StatusBanner';
+import { apiFetch, apiRequest } from '@/lib/api';
+import { hasAccessToken } from '@/lib/auth';
+import {
+  normalizeDiaryAiFeedback,
+  normalizeGuidedResponse,
+  type DiaryAiFeedback,
+  type DiaryEmotion,
+  type DiaryGuidedResponse,
+  type DiaryLifeDimensions,
+} from '@/lib/diary';
+import { useRequireAuth } from '@/hooks/useRequireAuth';
 
 interface DiaryDetail {
   id: number;
   user_id: number;
   diary_date: string;
   content: string;
-  emotions: Array<{ emotion: string; intensity: number }> | null;
+  emotions: DiaryEmotion[] | null;
   emotion_trigger: string | null;
-  life_dimensions: {
-    sleep: number;
-    diet: number;
-    exercise: number;
-    social: number;
-    productivity: number;
-  } | null;
-  guided_responses: any;
+  life_dimensions: DiaryLifeDimensions | null;
+  guided_responses: DiaryGuidedResponse | null;
   template_used: string | null;
   word_count: number;
   writing_duration: number;
-  ai_feedback: any;
+  ai_feedback: DiaryAiFeedback | null;
   created_at: string;
   updated_at: string;
+}
+
+interface DiaryDetailApiResponse extends Omit<DiaryDetail, 'guided_responses' | 'ai_feedback'> {
+  guided_responses: unknown;
+  ai_feedback: unknown;
 }
 
 const EMOTION_COLORS: Record<string, string> = {
@@ -41,68 +55,84 @@ const EMOTION_COLORS: Record<string, string> = {
   '恐惧': 'bg-purple-200 text-purple-800',
 };
 
+interface DiaryNotice {
+  title?: string;
+  message: string;
+  tone: 'info' | 'success' | 'warning' | 'error';
+}
+
 export default function DiaryDetailPage() {
   const router = useRouter();
   const params = useParams();
   const diaryId = params.id as string;
+  useRequireAuth();
 
   const [diary, setDiary] = useState<DiaryDetail | null>(null);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState('');
+  const [notice, setNotice] = useState<DiaryNotice | null>(null);
+  const [showDeleteDialog, setShowDeleteDialog] = useState(false);
+  const [isDeleting, setIsDeleting] = useState(false);
 
   useEffect(() => {
-    const token = localStorage.getItem('access_token');
-    if (!token) {
-      router.push('/login');
-      return;
-    }
-
-    fetchDiary();
-  }, [diaryId]);
-
-  const fetchDiary = async () => {
-    try {
-      const token = localStorage.getItem('access_token');
-      const response = await fetch(`http://127.0.0.1:8000/api/diary/${diaryId}`, {
-        headers: { 'Authorization': `Bearer ${token}` },
-      });
-
-      if (response.ok) {
-        const data = await response.json();
-        setDiary(data);
-      } else {
-        alert('获取日记详情失败');
-        router.push('/diary');
-      }
-    } catch (error) {
-      console.error('获取日记详情失败:', error);
-      alert('网络错误，请重试');
-      router.push('/diary');
-    } finally {
+    if (!hasAccessToken()) {
       setLoading(false);
-    }
-  };
-
-  const handleDelete = async () => {
-    if (!confirm('确定要删除这篇日记吗？')) {
       return;
     }
 
-    try {
-      const token = localStorage.getItem('access_token');
-      const response = await fetch(`http://127.0.0.1:8000/api/diary/${diaryId}`, {
-        method: 'DELETE',
-        headers: { 'Authorization': `Bearer ${token}` },
-      });
+    let cancelled = false;
 
-      if (response.ok) {
-        alert('删除成功');
-        router.push('/diary');
-      } else {
-        alert('删除失败');
+    const loadDiary = async () => {
+      setLoadError('');
+
+      try {
+        const data = await apiRequest<DiaryDetailApiResponse>(`/api/diary/${diaryId}`);
+
+        if (cancelled || !data) {
+          return;
+        }
+
+        setDiary({
+          ...data,
+          guided_responses: normalizeGuidedResponse(data.guided_responses),
+          ai_feedback: normalizeDiaryAiFeedback(data.ai_feedback),
+        });
+      } catch (error) {
+        console.error('获取日记详情失败:', error);
+        setLoadError('日记详情暂时无法加载，请返回日记列表后重试。');
+      } finally {
+        if (!cancelled) {
+          setLoading(false);
+        }
       }
+    };
+
+    void loadDiary();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [diaryId, router]);
+
+  const confirmDelete = async () => {
+    setShowDeleteDialog(false);
+    setNotice(null);
+    setIsDeleting(true);
+
+    try {
+      await apiFetch(`/api/diary/${diaryId}`, {
+        method: 'DELETE',
+      });
+      router.push('/diary');
     } catch (error) {
       console.error('删除失败:', error);
-      alert('网络错误，请重试');
+      setNotice({
+        title: '删除失败',
+        message: '这篇日记暂时无法删除，请稍后重试。',
+        tone: 'error',
+      });
+    } finally {
+      setIsDeleting(false);
     }
   };
 
@@ -117,18 +147,27 @@ export default function DiaryDetailPage() {
   };
 
   if (loading) {
+    return <PageLoading label="加载日记详情..." tone="blue" />;
+  }
+
+  if (loadError) {
     return (
-      <div className="min-h-screen bg-gradient-to-br from-blue-50 via-purple-50 to-pink-50 flex items-center justify-center">
-        <div className="text-center">
-          <div className="inline-block animate-spin rounded-full h-12 w-12 border-4 border-blue-600 border-t-transparent"></div>
-          <p className="mt-4 text-gray-600">加载中...</p>
-        </div>
-      </div>
+      <PageErrorState
+        message={loadError}
+        actionLabel="返回日记列表"
+        onAction={() => router.push('/diary')}
+      />
     );
   }
 
   if (!diary) {
-    return null;
+    return hasAccessToken() ? (
+      <PageErrorState
+        message="这篇日记不存在或暂时不可用。"
+        actionLabel="返回日记列表"
+        onAction={() => router.push('/diary')}
+      />
+    ) : null;
   }
 
   return (
@@ -144,15 +183,27 @@ export default function DiaryDetailPage() {
           </button>
           <div className="text-lg font-semibold text-gray-800">日记详情</div>
           <button
-            onClick={handleDelete}
-            className="text-red-600 hover:text-red-800 transition-colors"
+            onClick={() => setShowDeleteDialog(true)}
+            disabled={isDeleting}
+            className="text-red-600 transition-colors hover:text-red-800 disabled:cursor-not-allowed disabled:opacity-50"
           >
-            🗑️ 删除
+            {isDeleting ? '删除中...' : '🗑️ 删除'}
           </button>
         </div>
       </nav>
 
       <div className="max-w-4xl mx-auto px-4 py-8">
+        {notice ? (
+          <div className="mb-6">
+            <StatusBanner
+              title={notice.title}
+              message={notice.message}
+              tone={notice.tone}
+              onClose={() => setNotice(null)}
+            />
+          </div>
+        ) : null}
+
         {/* 日记内容 */}
         <div className="bg-white rounded-2xl shadow-xl p-8 mb-6">
           <div className="mb-6">
@@ -308,7 +359,7 @@ export default function DiaryDetailPage() {
               <div className="p-6 bg-purple-50 rounded-xl">
                 <h3 className="text-lg font-semibold text-gray-800 mb-3">💡 推荐内容</h3>
                 <div className="space-y-3">
-                  {diary.ai_feedback.recommendations.map((rec: any, index: number) => (
+                  {diary.ai_feedback.recommendations.map((rec, index: number) => (
                     <div key={index} className="bg-white p-4 rounded-lg">
                       <div className="font-semibold text-gray-800">{rec.title}</div>
                       <div className="text-sm text-gray-600 mt-1">{rec.reason}</div>
@@ -332,6 +383,20 @@ export default function DiaryDetailPage() {
           </div>
         )}
       </div>
+
+      <ConfirmDialog
+        open={showDeleteDialog}
+        title="删除这篇日记"
+        description="删除后无法恢复，相关的情绪分析和 AI 反馈也会一并移除。确认继续吗？"
+        confirmText={isDeleting ? '删除中...' : '确认删除'}
+        cancelText="保留日记"
+        confirmTone="danger"
+        pending={isDeleting}
+        onConfirm={() => {
+          void confirmDelete();
+        }}
+        onCancel={() => setShowDeleteDialog(false)}
+      />
     </div>
   );
 }

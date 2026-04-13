@@ -1,5 +1,5 @@
 """FastAPI 主应用"""
-import os
+from pathlib import Path
 from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -7,7 +7,7 @@ from .database import engine, Base
 from .routers import auth, chat, assessment, training, diary, growth, analytics
 
 # 加载环境变量
-load_dotenv()
+load_dotenv(Path(__file__).resolve().parents[1] / ".env")
 
 # 创建数据库表
 Base.metadata.create_all(bind=engine)
@@ -22,7 +22,10 @@ app = FastAPI(
 # 配置 CORS（允许前端跨域请求）
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],  # Next.js 开发服务器
+    allow_origins=[
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

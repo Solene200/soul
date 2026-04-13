@@ -1,17 +1,19 @@
 """感知规划模块 - 基于本地模型的智能判断"""
+import os
 import re
 import logging
 import ollama
 from typing import Dict, List
 
 logger = logging.getLogger(__name__)
+LOCAL_MODEL_NAME = os.getenv("OLLAMA_MODEL", "qwen3:1.7b")
 
 class PerceptionPlanningModule:
     """感知规划模块：使用本地 Ollama 模型执行双层判断（隐私检测 + 复杂度分析）"""
     
     def __init__(self):
         self.ollama_client = ollama.AsyncClient()
-        self.model_name = "ethanwhh/qwen3-4b-soul"
+        self.model_name = LOCAL_MODEL_NAME
         
         # 危机关键词（保留关键词检测，因为危机情况需要快速响应）
         self.crisis_keywords = [

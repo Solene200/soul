@@ -2,6 +2,11 @@
 
 import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
+import { PageErrorState } from '@/components/PageErrorState';
+import { PageLoading } from '@/components/PageLoading';
+import { apiRequest } from '@/lib/api';
+import { hasAccessToken } from '@/lib/auth';
+import { useRequireAuth } from '@/hooks/useRequireAuth';
 
 interface Training {
   id: number;
@@ -56,46 +61,47 @@ const TRAINING_TYPES: Record<string, { name: string; color: string; emoji: strin
 
 export default function TrainingPage() {
   const router = useRouter();
+  useRequireAuth();
   const [trainings, setTrainings] = useState<Training[]>([]);
   const [loading, setLoading] = useState(true);
   const [selectedType, setSelectedType] = useState<string | null>(null);
+  const [loadError, setLoadError] = useState('');
 
   useEffect(() => {
-    const token = localStorage.getItem('access_token');
-    if (!token) {
-      router.push('/login');
+    if (!hasAccessToken()) {
+      setLoading(false);
       return;
     }
-    
-    fetchTrainings();
-  }, [router, selectedType]);
 
-  const fetchTrainings = async () => {
-    try {
-      const token = localStorage.getItem('access_token');
-      const url = selectedType
-        ? `http://127.0.0.1:8000/api/training/list?training_type=${selectedType}`
-        : 'http://127.0.0.1:8000/api/training/list';
-      
-      const response = await fetch(url, {
-        headers: {
-          'Authorization': `Bearer ${token}`,
-        },
-      });
+    let cancelled = false;
 
-      if (response.ok) {
-        const data = await response.json();
-        setTrainings(data);
-      } else {
-        alert('获取训练列表失败');
+    const loadTrainings = async () => {
+      setLoadError('');
+
+      try {
+        const data = await apiRequest<Training[]>('/api/training/list', {
+          query: selectedType ? { training_type: selectedType } : undefined,
+        });
+
+        if (!cancelled && data) {
+          setTrainings(data);
+        }
+      } catch (error) {
+        console.error('获取训练列表失败:', error);
+        setLoadError('训练列表暂时无法加载，请稍后重试。');
+      } finally {
+        if (!cancelled) {
+          setLoading(false);
+        }
       }
-    } catch (error) {
-      console.error('获取训练列表失败:', error);
-      alert('网络错误，请重试');
-    } finally {
-      setLoading(false);
-    }
-  };
+    };
+
+    void loadTrainings();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedType]);
 
   const startTraining = (id: number) => {
     router.push(`/training/${id}`);
@@ -171,10 +177,13 @@ export default function TrainingPage() {
 
         {/* 训练卡片列表 */}
         {loading ? (
-          <div className="text-center py-20">
-            <div className="inline-block animate-spin rounded-full h-12 w-12 border-4 border-blue-600 border-t-transparent"></div>
-            <p className="mt-4 text-gray-600">加载中...</p>
-          </div>
+          <PageLoading label="加载训练列表..." tone="blue" />
+        ) : loadError ? (
+          <PageErrorState
+            message={loadError}
+            actionLabel="重新加载"
+            onAction={() => window.location.reload()}
+          />
         ) : trainings.length === 0 ? (
           <div className="text-center py-20">
             <div className="text-6xl mb-4">🔍</div>

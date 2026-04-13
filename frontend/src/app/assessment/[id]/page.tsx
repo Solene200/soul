@@ -2,6 +2,13 @@
 
 import { useState, useEffect } from 'react';
 import { useRouter, useParams } from 'next/navigation';
+import { ConfirmDialog } from '@/components/ConfirmDialog';
+import { PageErrorState } from '@/components/PageErrorState';
+import { PageLoading } from '@/components/PageLoading';
+import { StatusBanner } from '@/components/StatusBanner';
+import { apiRequest } from '@/lib/api';
+import { hasAccessToken } from '@/lib/auth';
+import { useRequireAuth } from '@/hooks/useRequireAuth';
 
 interface Question {
   id: number;
@@ -21,56 +28,106 @@ interface AssessmentDetail {
   icon: string;
 }
 
+interface AssessmentDraft {
+  currentQuestionIndex: number;
+  answers: number[];
+}
+
+interface AssessmentNotice {
+  title?: string;
+  message: string;
+  tone: 'info' | 'success' | 'warning' | 'error';
+}
+
+const createDraftKey = (templateId: number) => `assessment_draft_${templateId}`;
+
 export default function AssessmentTestPage() {
   const router = useRouter();
   const params = useParams();
   const templateId = parseInt(params.id as string);
+  useRequireAuth();
 
   const [assessment, setAssessment] = useState<AssessmentDetail | null>(null);
   const [currentQuestionIndex, setCurrentQuestionIndex] = useState(0);
   const [answers, setAnswers] = useState<number[]>([]);
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
+  const [loadError, setLoadError] = useState('');
+  const [notice, setNotice] = useState<AssessmentNotice | null>(null);
+  const [showExitConfirm, setShowExitConfirm] = useState(false);
 
   useEffect(() => {
-    const token = localStorage.getItem('access_token');
-    if (!token) {
-      router.push('/login');
+    if (!hasAccessToken()) {
+      setLoading(false);
       return;
     }
 
-    fetchAssessmentDetail();
+    let cancelled = false;
+
+    const loadAssessmentDetail = async () => {
+      setLoadError('');
+
+      try {
+        const data = await apiRequest<AssessmentDetail>(
+          `/api/assessments/${templateId}/template`
+        );
+
+        if (cancelled || !data) {
+          return;
+        }
+
+        setAssessment(data);
+
+        let draft: AssessmentDraft | null = null;
+        const draftRaw = window.localStorage.getItem(createDraftKey(templateId));
+
+        if (draftRaw) {
+          try {
+            draft = JSON.parse(draftRaw) as AssessmentDraft;
+          } catch {
+            window.localStorage.removeItem(createDraftKey(templateId));
+          }
+        }
+
+        if (draft && draft.answers.length === data.question_count) {
+          setAnswers(draft.answers);
+          setCurrentQuestionIndex(
+            Math.min(draft.currentQuestionIndex, data.question_count - 1)
+          );
+          setNotice({
+            title: '已恢复进度',
+            message: '系统已恢复你上次未完成的作答内容，可以继续完成本次评估。',
+            tone: 'info',
+          });
+          return;
+        }
+
+        setAnswers(new Array(data.question_count).fill(-1));
+      } catch (error) {
+        console.error('获取评估详情失败:', error);
+        setLoadError('当前评估暂时无法加载，请返回评估列表后重试。');
+      } finally {
+        if (!cancelled) {
+          setLoading(false);
+        }
+      }
+    };
+
+    void loadAssessmentDetail();
+
+    return () => {
+      cancelled = true;
+    };
   }, [router, templateId]);
 
-  const fetchAssessmentDetail = async () => {
-    try {
-      const token = localStorage.getItem('access_token');
-      const response = await fetch(
-        `http://127.0.0.1:8000/api/assessments/${templateId}/template`,
-        {
-          headers: {
-            'Authorization': `Bearer ${token}`,
-          },
-        }
+  useEffect(() => {
+    if (assessment && answers.length === assessment.question_count) {
+      window.localStorage.setItem(
+        createDraftKey(templateId),
+        JSON.stringify({ currentQuestionIndex, answers } satisfies AssessmentDraft)
       );
-
-      if (response.ok) {
-        const data = await response.json();
-        setAssessment(data);
-        // 初始化答案数组（全部为-1表示未作答）
-        setAnswers(new Array(data.question_count).fill(-1));
-      } else {
-        alert('获取评估详情失败');
-        router.push('/assessment');
-      }
-    } catch (error) {
-      console.error('获取评估详情失败:', error);
-      alert('网络错误，请重试');
-      router.push('/assessment');
-    } finally {
-      setLoading(false);
     }
-  };
+  }, [answers, assessment, currentQuestionIndex, templateId]);
 
   const handleAnswer = (value: number) => {
     const newAnswers = [...answers];
@@ -97,55 +154,70 @@ export default function AssessmentTestPage() {
 
   const submitAssessment = async () => {
     if (!canSubmit()) {
-      alert('请完成所有题目后再提交');
+      setNotice({
+        title: '还有题目未完成',
+        message: '请完成所有题目后再提交评估。',
+        tone: 'warning',
+      });
       return;
     }
 
+    setNotice(null);
     setSubmitting(true);
 
     try {
-      const token = localStorage.getItem('access_token');
-      const response = await fetch('http://127.0.0.1:8000/api/assessments/submit', {
+      const result = await apiRequest<{ id: number }>('/api/assessments/submit', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${token}`,
-        },
-        body: JSON.stringify({
+        json: {
           template_id: templateId,
-          answers: answers,
-        }),
+          answers,
+        },
       });
 
-      if (response.ok) {
-        const result = await response.json();
-        // 跳转到结果页面
+      if (result?.id) {
+        window.localStorage.removeItem(createDraftKey(templateId));
         router.push(`/assessment/result/${result.id}`);
       } else {
-        const error = await response.json();
-        alert(`提交失败：${error.detail || '未知错误'}`);
+        setNotice({
+          title: '提交失败',
+          message: '未获取到评估结果，请稍后重试。',
+          tone: 'error',
+        });
       }
     } catch (error) {
       console.error('提交评估失败:', error);
-      alert('网络错误，请重试');
+      setNotice({
+        title: '提交失败',
+        message: '网络异常，请稍后重试。',
+        tone: 'error',
+      });
     } finally {
       setSubmitting(false);
     }
   };
 
   if (loading) {
+    return <PageLoading label="加载评估内容..." tone="purple" />;
+  }
+
+  if (loadError) {
     return (
-      <div className="min-h-screen bg-gradient-to-br from-purple-50 via-pink-50 to-blue-50 flex items-center justify-center">
-        <div className="text-center">
-          <div className="inline-block animate-spin rounded-full h-12 w-12 border-4 border-purple-600 border-t-transparent"></div>
-          <p className="mt-4 text-gray-600">加载中...</p>
-        </div>
-      </div>
+      <PageErrorState
+        message={loadError}
+        actionLabel="返回评估列表"
+        onAction={() => router.push('/assessment')}
+      />
     );
   }
 
   if (!assessment) {
-    return null;
+    return hasAccessToken() ? (
+      <PageErrorState
+        message="当前评估内容不存在或暂时不可用。"
+        actionLabel="返回评估列表"
+        onAction={() => router.push('/assessment')}
+      />
+    ) : null;
   }
 
   const currentQuestion = assessment.questions[currentQuestionIndex];
@@ -158,11 +230,7 @@ export default function AssessmentTestPage() {
       <nav className="bg-white/80 backdrop-blur-md shadow-sm px-6 py-4">
         <div className="max-w-4xl mx-auto flex items-center justify-between">
           <button
-            onClick={() => {
-              if (confirm('确定要退出评估吗？当前进度将不会保存。')) {
-                router.push('/assessment');
-              }
-            }}
+            onClick={() => setShowExitConfirm(true)}
             className="text-gray-600 hover:text-gray-800 transition-colors"
           >
             ← 退出
@@ -170,7 +238,7 @@ export default function AssessmentTestPage() {
           <div className="text-center">
             <h1 className="text-lg font-bold text-gray-800">{assessment.display_name}</h1>
             <p className="text-xs text-gray-500">
-              已完成 {answeredCount}/{assessment.question_count} 题
+              已完成 {answeredCount}/{assessment.question_count} 题，进度会自动保存
             </p>
           </div>
           <div className="w-16" /> {/* 占位 */}
@@ -191,6 +259,17 @@ export default function AssessmentTestPage() {
 
       {/* 问题卡片 */}
       <div className="max-w-4xl mx-auto px-4 py-12">
+        {notice ? (
+          <div className="mb-6">
+            <StatusBanner
+              title={notice.title}
+              message={notice.message}
+              tone={notice.tone}
+              onClose={() => setNotice(null)}
+            />
+          </div>
+        ) : null}
+
         <div className="bg-white rounded-2xl shadow-xl p-8">
           {/* 问题编号 */}
           <div className="flex items-center justify-between mb-6">
@@ -296,6 +375,16 @@ export default function AssessmentTestPage() {
           </div>
         </div>
       </div>
+
+      <ConfirmDialog
+        open={showExitConfirm}
+        title="退出当前评估"
+        description="当前进度已经自动保存，下次进入会从当前题目继续。确认现在退出吗？"
+        confirmText="退出评估"
+        cancelText="继续作答"
+        onConfirm={() => router.push('/assessment')}
+        onCancel={() => setShowExitConfirm(false)}
+      />
     </div>
   );
 }

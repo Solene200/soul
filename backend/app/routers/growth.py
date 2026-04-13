@@ -110,8 +110,7 @@ async def get_stats(
     
     # 计算当前连胜（从最后一天往前数）
     current_streak = 0
-    today_str = datetime.now().strftime("%Y-%m-%d")
-    check_date = datetime.now()
+    check_date = datetime.strptime(end_date, "%Y-%m-%d")
     
     while True:
         date_str = check_date.strftime("%Y-%m-%d")

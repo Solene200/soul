@@ -2,6 +2,11 @@
 
 import { useState, useEffect } from 'react';
 import { useRouter, useParams } from 'next/navigation';
+import { PageErrorState } from '@/components/PageErrorState';
+import { PageLoading } from '@/components/PageLoading';
+import { apiRequest } from '@/lib/api';
+import { hasAccessToken } from '@/lib/auth';
+import { useRequireAuth } from '@/hooks/useRequireAuth';
 
 interface AssessmentResult {
   id: number;
@@ -22,6 +27,7 @@ interface TrendData {
   scores: number[];
   levels: string[];
   count: number;
+  max_score?: number | null;
 }
 
 const RISK_LEVEL_CONFIG: Record<string, { color: string; bg: string; emoji: string; name: string }> = {
@@ -38,82 +44,89 @@ export default function AssessmentResultPage() {
   const router = useRouter();
   const params = useParams();
   const recordId = parseInt(params.id as string);
+  useRequireAuth();
 
   const [result, setResult] = useState<AssessmentResult | null>(null);
   const [trendData, setTrendData] = useState<TrendData | null>(null);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState('');
 
   useEffect(() => {
-    const token = localStorage.getItem('access_token');
-    if (!token) {
-      router.push('/login');
+    if (!hasAccessToken()) {
+      setLoading(false);
       return;
     }
 
-    fetchResult();
-  }, [router, recordId]);
+    let cancelled = false;
 
-  const fetchResult = async () => {
-    try {
-      const token = localStorage.getItem('access_token');
-      
-      // 获取评估结果
-      const resultResponse = await fetch(
-        `http://127.0.0.1:8000/api/assessments/${recordId}/result`,
-        {
-          headers: {
-            'Authorization': `Bearer ${token}`,
-          },
-        }
-      );
+    const loadResult = async () => {
+      setLoadError('');
 
-      if (resultResponse.ok) {
-        const resultData = await resultResponse.json();
-        setResult(resultData);
-
-        // 获取趋势数据
-        const trendResponse = await fetch(
-          `http://127.0.0.1:8000/api/assessments/trends/${resultData.scale_name}`,
-          {
-            headers: {
-              'Authorization': `Bearer ${token}`,
-            },
-          }
+      try {
+        const resultData = await apiRequest<AssessmentResult>(
+          `/api/assessments/${recordId}/result`
         );
 
-        if (trendResponse.ok) {
-          const trendData = await trendResponse.json();
-          setTrendData(trendData);
+        if (!resultData || cancelled) {
+          return;
         }
-      } else {
-        alert('获取评估结果失败');
-        router.push('/assessment');
+
+        setResult(resultData);
+
+        try {
+          const trend = await apiRequest<TrendData>(
+            `/api/assessments/trends/${resultData.scale_name}`
+          );
+
+          if (!cancelled && trend) {
+            setTrendData(trend);
+          }
+        } catch (trendError) {
+          console.error('获取评估趋势失败:', trendError);
+        }
+      } catch (error) {
+        console.error('获取评估结果失败:', error);
+        setLoadError('评估结果暂时无法加载，请返回评估列表后重试。');
+      } finally {
+        if (!cancelled) {
+          setLoading(false);
+        }
       }
-    } catch (error) {
-      console.error('获取评估结果失败:', error);
-      alert('网络错误，请重试');
-      router.push('/assessment');
-    } finally {
-      setLoading(false);
-    }
-  };
+    };
+
+    void loadResult();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [recordId, router]);
 
   if (loading) {
+    return <PageLoading label="加载评估结果..." tone="purple" />;
+  }
+
+  if (loadError) {
     return (
-      <div className="min-h-screen bg-gradient-to-br from-purple-50 via-pink-50 to-blue-50 flex items-center justify-center">
-        <div className="text-center">
-          <div className="inline-block animate-spin rounded-full h-12 w-12 border-4 border-purple-600 border-t-transparent"></div>
-          <p className="mt-4 text-gray-600">加载中...</p>
-        </div>
-      </div>
+      <PageErrorState
+        message={loadError}
+        actionLabel="返回评估列表"
+        onAction={() => router.push('/assessment')}
+      />
     );
   }
 
   if (!result) {
-    return null;
+    return hasAccessToken() ? (
+      <PageErrorState
+        message="当前评估结果不存在或暂时不可用。"
+        actionLabel="返回评估列表"
+        onAction={() => router.push('/assessment')}
+      />
+    ) : null;
   }
 
   const levelConfig = RISK_LEVEL_CONFIG[result.risk_level] || RISK_LEVEL_CONFIG['正常'];
+  const trendMaxScore = trendData?.max_score || Math.max(...(trendData?.scores ?? [1]), 1);
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-purple-50 via-pink-50 to-blue-50">
@@ -232,7 +245,7 @@ export default function AssessmentResultPage() {
                                 ? 'bg-yellow-500'
                                 : 'bg-green-500'
                             }`}
-                            style={{ width: `${(score / 40) * 100}%` }}
+                            style={{ width: `${Math.min((score / trendMaxScore) * 100, 100)}%` }}
                           />
                         </div>
                         <div className="text-lg font-bold text-gray-800 w-12 text-right">{score}</div>

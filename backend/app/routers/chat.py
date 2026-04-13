@@ -55,13 +55,26 @@ async def get_active_conversation(
     ).order_by(Conversation.last_active.desc()).first()
     
     if not conversation:
-        return {"conversation_id": None, "phase": None, "round_count": 0}
+        return {"conversation_id": None, "phase": None, "round_count": 0, "messages": []}
+
+    messages = db.query(Message).filter(
+        Message.conversation_id == conversation.id
+    ).order_by(Message.created_at.asc()).all()
     
     return {
         "conversation_id": conversation.id,
         "phase": conversation.phase,
         "round_count": conversation.round_count,
-        "status": conversation.status
+        "status": conversation.status,
+        "messages": [
+            {
+                "id": message.id,
+                "role": message.role,
+                "content": message.content,
+                "created_at": message.created_at.isoformat()
+            }
+            for message in messages
+        ]
     }
 
 

@@ -2,13 +2,132 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from sqlalchemy import func
-from typing import List, Dict, Any
+from typing import Any
 from datetime import datetime, timedelta
 from ..database import get_db
 from ..models import User, Diary, AssessmentRecord, TrainingRecord, GrowthRecord
 from ..auth import get_current_user
 
 router = APIRouter(prefix="/api/analytics", tags=["analytics"])
+
+POSITIVE_EMOTIONS = {"快乐", "兴奋", "平静", "感恩", "满足"}
+NEGATIVE_EMOTIONS = {"悲伤", "焦虑", "愤怒", "失落", "孤独", "压力", "恐惧"}
+
+
+def _coerce_emotions(raw_emotions: Any) -> list[dict[str, Any]]:
+    if not isinstance(raw_emotions, list):
+        return []
+
+    return [item for item in raw_emotions if isinstance(item, dict)]
+
+
+def _get_emotion_name(emotion: dict[str, Any]) -> str | None:
+    value = emotion.get("emotion")
+    return value if isinstance(value, str) and value else None
+
+
+def _get_emotion_intensity(emotion: dict[str, Any]) -> int:
+    value = emotion.get("intensity")
+    return value if isinstance(value, int) else 0
+
+
+@router.get("/yearly-report")
+async def get_yearly_report(
+    year: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """获取指定年份的数据分析报表"""
+    current_year = datetime.now().year
+    if year < 1900 or year > current_year:
+        raise HTTPException(status_code=400, detail="年份参数无效")
+
+    start_date = f"{year}-01-01"
+    end_date = f"{year}-12-31"
+    start_dt = datetime(year, 1, 1)
+    end_dt = datetime(year + 1, 1, 1)
+
+    diaries = db.query(Diary).filter(
+        Diary.user_id == current_user.id,
+        Diary.diary_date >= start_date,
+        Diary.diary_date <= end_date
+    ).order_by(Diary.diary_date.asc()).all()
+
+    assessments = db.query(AssessmentRecord).filter(
+        AssessmentRecord.user_id == current_user.id,
+        AssessmentRecord.created_at >= start_dt,
+        AssessmentRecord.created_at < end_dt
+    ).all()
+
+    trainings = db.query(TrainingRecord).filter(
+        TrainingRecord.user_id == current_user.id,
+        TrainingRecord.completed_at >= start_dt,
+        TrainingRecord.completed_at < end_dt
+    ).all()
+
+    emotion_counts: dict[str, int] = {}
+    emotion_trend = []
+    positive_count = 0
+    total_emotion_count = 0
+
+    for diary in diaries:
+        emotions = _coerce_emotions(diary.emotions)
+        score = 0
+        main_emotion = diary.main_emotion
+
+        for emotion in emotions:
+            emotion_name = _get_emotion_name(emotion)
+            if not emotion_name:
+                continue
+
+            intensity = _get_emotion_intensity(emotion)
+            total_emotion_count += 1
+            emotion_counts[emotion_name] = emotion_counts.get(emotion_name, 0) + 1
+
+            if not main_emotion:
+                main_emotion = emotion_name
+
+            if emotion_name in POSITIVE_EMOTIONS:
+                positive_count += 1
+                score += intensity
+            elif emotion_name in NEGATIVE_EMOTIONS:
+                score -= intensity
+
+        emotion_trend.append({
+            "date": diary.diary_date,
+            "emotion": main_emotion or "未知",
+            "score": score,
+        })
+
+    emotion_distribution = sorted(
+        (
+            {"emotion": emotion, "count": count}
+            for emotion, count in emotion_counts.items()
+        ),
+        key=lambda item: item["count"],
+        reverse=True,
+    )
+
+    total_words = sum(diary.word_count or 0 for diary in diaries)
+    training_duration = sum(record.duration or 0 for record in trainings)
+    positive_ratio = (
+        round((positive_count / total_emotion_count) * 100)
+        if total_emotion_count > 0
+        else 0
+    )
+
+    return {
+        "year": year,
+        "diary_count": len(diaries),
+        "assessment_count": len(assessments),
+        "training_count": len(trainings),
+        "training_duration": training_duration,
+        "total_words": total_words,
+        "positive_ratio": positive_ratio,
+        "total_emotion_count": total_emotion_count,
+        "emotion_trend": emotion_trend,
+        "emotion_distribution": emotion_distribution,
+    }
 
 
 @router.get("/dashboard")

@@ -2,6 +2,9 @@
 
 import { useState } from 'react';
 import { useRouter } from 'next/navigation';
+import { StatusBanner } from '@/components/StatusBanner';
+import { API_BASE_URL, ApiError, apiRequest } from '@/lib/api';
+import { saveAuthSession } from '@/lib/auth';
 
 const AUTH_REQUEST_TIMEOUT_MS = 8000;
 
@@ -15,10 +18,12 @@ export default function LoginPage() {
   });
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
+  const [successMessage, setSuccessMessage] = useState('');
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError('');
+    setSuccessMessage('');
 
     // 前端基础验证
     if (!formData.username || !formData.password) {
@@ -37,44 +42,39 @@ export default function LoginPage() {
 
     try {
       const endpoint = isLogin ? '/api/auth/login' : '/api/auth/register';
-      const url = `http://127.0.0.1:8000${endpoint}`;
-      
-      const response = await fetch(url, {
+      const data = await apiRequest<{ access_token?: string }>(endpoint, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
+        auth: false,
+        json: {
           username: formData.username,
           password: formData.password,
-        }),
+        },
         signal: controller.signal,
       });
 
-      const data = await response.json();
-
-      if (!response.ok) {
-        throw new Error(data.detail || '操作失败');
-      }
-
       if (isLogin) {
-        // 登录成功：保存 token
-        localStorage.setItem('access_token', data.access_token);
-        localStorage.setItem('username', formData.username);
+        if (!data?.access_token) {
+          throw new Error('登录响应缺少 access_token');
+        }
+
+        saveAuthSession(data.access_token, formData.username);
         router.push('/dashboard');
       } else {
-        // 注册成功：提示并切换到登录
-        alert('注册成功！请登录');
+        setSuccessMessage('注册成功，请使用刚创建的账号登录。');
         setIsLogin(true);
         setFormData({ username: formData.username, password: '', confirmPassword: '' });
       }
-    } catch (err: any) {
-      if (err.name === 'AbortError') {
+    } catch (err: unknown) {
+      if (err instanceof DOMException && err.name === 'AbortError') {
         setError('请求超时，请确认后端服务已启动后重试');
       } else if (err instanceof TypeError) {
-        setError('无法连接到后端服务，请确认 http://127.0.0.1:8000 已启动');
-      } else {
+        setError(`无法连接到后端服务，请确认 ${API_BASE_URL} 已启动`);
+      } else if (err instanceof ApiError) {
+        setError(err.message);
+      } else if (err instanceof Error) {
         setError(err.message || '操作失败，请重试');
+      } else {
+        setError('操作失败，请重试');
       }
     } finally {
       window.clearTimeout(timeoutId);
@@ -122,6 +122,7 @@ export default function LoginPage() {
               onClick={() => {
                 setIsLogin(true);
                 setError('');
+                setSuccessMessage('');
                 setFormData({ username: '', password: '', confirmPassword: '' });
               }}
               className={`flex-1 py-2 rounded-lg font-semibold transition-all ${
@@ -136,6 +137,7 @@ export default function LoginPage() {
               onClick={() => {
                 setIsLogin(false);
                 setError('');
+                setSuccessMessage('');
                 setFormData({ username: '', password: '', confirmPassword: '' });
               }}
               className={`flex-1 py-2 rounded-lg font-semibold transition-all ${
@@ -150,6 +152,15 @@ export default function LoginPage() {
 
           {/* 表单 */}
           <form onSubmit={handleSubmit} className="space-y-4">
+            {successMessage ? (
+              <StatusBanner
+                title="注册成功"
+                message={successMessage}
+                tone="success"
+                onClose={() => setSuccessMessage('')}
+              />
+            ) : null}
+
             {/* 用户名输入 */}
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-2">
