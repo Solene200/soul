@@ -2,7 +2,7 @@
 
 # 💕 心灵奇旅 Soul
 
-### AI 心理康复陪伴平台 · 本地优先 · 隐私友好 · 架构完整
+### AI 心理康复陪伴平台 · 本地优先 · 隐私友好 
 
 [![心灵奇旅](https://img.shields.io/badge/心灵奇旅-AI心理健康平台-ff69b4?style=for-the-badge)](#-项目简介)
 [![Next.js](https://img.shields.io/badge/Next.js-16-black?style=for-the-badge&logo=nextdotjs)](#️-技术栈)
@@ -35,7 +35,7 @@
 
 ### 🎯 项目定位
 
-> 一个基于 `Next.js 16 + FastAPI + SQLite + Ollama / ModelScope` 构建的本地优先 AI 心理健康平台，强调隐私保护、业务闭环与工程完整性。
+> 一个基于 `Next.js 16 + FastAPI + SQLite + Ollama / ModelScope` 构建的本地优先 AI 心理康复平台，强调隐私保护、业务闭环与工程完整性。
 
 
 
@@ -419,11 +419,7 @@ NEXT_PUBLIC_API_BASE_URL=http://127.0.0.1:8000
 ![核心功能](./frontend/public/introduction2.png)
 ![设计理念](./frontend/public/introduction3.png)
 
-### 用户登录
 
-> 新用户注册 + 老用户登录
-
-![用户登录](./frontend/public/login.png)
 
 ### 首页
 
@@ -467,20 +463,7 @@ NEXT_PUBLIC_API_BASE_URL=http://127.0.0.1:8000
 
 ![数据分析](./frontend/public/analytics.png)
 
----
 
-## 📚 技术文档
-
-- [项目整体架构、状态管理与面试拆解](./soul-project-architecture-interview-guide.md)
-- [前端面试分析文档](./frontend-interview-analysis.md)
-
-如果你希望快速看懂项目，推荐阅读顺序：
-
-1. `README.md`
-2. `soul-project-architecture-interview-guide.md`
-3. `frontend-interview-analysis.md`
-
----
 
 ## ⚠️ 限制与说明
 
