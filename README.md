@@ -56,19 +56,6 @@
 - **本地优先策略**：敏感内容优先走本地模型，降低隐私泄露风险
 - **跨模块派生数据链路**：日记写入后自动同步成长记录、检测成就、进入分析报表
 
-### 📦 一眼看懂这个项目
-
-| 维度 | 当前能力 |
-| --- | --- |
-| 核心业务模块 | 6 个 |
-| 心理评估量表 | 6 个 |
-| 训练模板 | 12 个 |
-| 情绪分类 | 12 类 |
-| 成长墙 | 365 天可视化 |
-| 对话协议 | SSE 流式输出 |
-| 存储策略 | SQLite 本地持久化 |
-| 模型策略 | Ollama 本地 + ModelScope 云端 |
-
 ---
 
 ## 🧩 功能模块
@@ -124,116 +111,6 @@
 - 展示核心指标、情绪趋势、情绪分布
 - 支持从用户注册年份开始查看历史年度数据
 
----
-
-## 🏗️ 系统架构
-
-### 1. 整体架构图
-
-```mermaid
-flowchart TD
-    U[用户浏览器] --> FE[Next.js 16 前端]
-    FE --> API[统一请求层 apiFetch / apiRequest]
-    API --> BE[FastAPI Router Layer]
-    BE --> AUTH[/auth]
-    BE --> CHAT[/chat]
-    BE --> ASSESS[/assessments]
-    BE --> TRAIN[/training]
-    BE --> DIARY[/diary]
-    BE --> GROWTH[/growth]
-    BE --> ANALYTICS[/analytics]
-
-    CHAT --> COORD[MultiAgentCoordinator]
-    COORD --> PER[PerceptionPlanning]
-    COORD --> PHASE[PhaseManager]
-    COORD --> ROUTER[ModelRouter]
-    ROUTER --> LOCAL[Ollama Local Model]
-    ROUTER --> REMOTE[ModelScope Remote Model]
-
-    ASSESS --> DB[(SQLite)]
-    TRAIN --> DB
-    DIARY --> DB
-    GROWTH --> DB
-    ANALYTICS --> DB
-    CHAT --> DB
-```
-
-### 2. 架构设计重点
-
-#### 前端
-
-- 使用 `Next.js App Router` 组织页面
-- 采用 **轻量基础层 + 页面自管理状态** 的方案
-- 统一请求封装在 `src/lib/api.ts`
-- 鉴权状态由 `localStorage + 未授权广播事件` 维护
-- 聊天流式解析、日记 AI 反馈规范化等能力下沉到 `src/lib`
-
-#### 后端
-
-- `FastAPI + SQLAlchemy + SQLite`
-- 路由按业务拆分：`auth / chat / assessments / training / diary / growth / analytics`
-- 聊天链路由 `MultiAgentCoordinator` 做统一编排
-- 模型路由由 `PerceptionPlanning + PhaseManager + ModelRouter` 共同决定
-
-#### 数据层
-
-- 事实表：`User / Conversation / Message / Diary / AssessmentRecord / TrainingRecord`
-- 派生表：`GrowthRecord / Achievement`
-- 模板表：`AssessmentTemplate / TrainingTemplate`
-
-### 3. 核心链路：日记 -> 成长 -> 成就 -> 分析
-
-```mermaid
-flowchart LR
-    A[用户写日记] --> B[保存 Diary]
-    B --> C[AI 分析情绪与反馈]
-    C --> D[同步 GrowthRecord]
-    D --> E[检查 Achievement]
-    D --> F[成长墙 / 统计]
-    B --> G[年度分析报表]
-    E --> G
-```
-
-### 4. 核心链路：聊天 -> AI 编排 -> SSE 返回
-
-```mermaid
-flowchart LR
-    A[前端发送消息] --> B[/api/chat/send]
-    B --> C[创建/恢复 Conversation]
-    C --> D[PerceptionPlanning: 隐私/复杂度/危机判断]
-    D --> E[PhaseManager: emotional/rational/solution]
-    E --> F[ModelRouter: 本地 or 云端]
-    F --> G[模型流式生成]
-    G --> H[SSE metadata/chunk/end]
-    H --> I[前端增量渲染]
-    G --> J[保存 assistant message]
-```
-
----
-
-## 🧱 项目结构
-
-```text
-.
-├── frontend/
-│   ├── src/app/                 # 各业务页面
-│   ├── src/components/          # PageLoading / StatusBanner / ConfirmDialog 等
-│   ├── src/hooks/               # useRequireAuth
-│   └── src/lib/                 # 请求、鉴权、聊天流、日记工具
-├── backend/
-│   ├── app/main.py              # FastAPI 应用入口
-│   ├── app/database.py          # SQLite / Session
-│   ├── app/models.py            # ORM 模型
-│   ├── app/schemas.py           # Pydantic Schema
-│   ├── app/auth.py              # JWT 工具与当前用户依赖
-│   ├── app/coordinator.py       # 聊天协调器
-│   ├── app/perception_planning.py
-│   ├── app/model_router.py
-│   ├── app/phase_manager.py
-│   └── app/routers/             # auth/chat/assessment/training/diary/growth/analytics
-├── soul-project-architecture-interview-guide.md
-└── frontend-interview-analysis.md
-```
 
 ---
 
@@ -261,54 +138,6 @@ Ollama
 httpx
 ```
 
-### 状态管理策略
-
-采用轻量高效的状态管理方案：
-
-- 页面状态：`useState / useEffect`
-- 持久化状态：`localStorage`
-- 鉴权广播：浏览器事件
-- 服务端状态：后端数据库与 API 作为真源
-
----
-
-## 🤖 AI 能力与模型策略
-
-### 默认本地模型
-
-- `qwen3:1.7b`
-
-优点：
-
-- 轻量
-- 适合本地部署
-- 隐私敏感内容可本地处理
-
-### 云端模型
-
-- `Qwen/Qwen3-Next-80B-A3B-Instruct`
-
-适合：
-
-- 更复杂的问题
-- 需要更强推理的对话
-
-### 路由策略
-
-- **危机内容**：优先本地处理并触发危机提示
-- **隐私内容**：强制本地模型
-- **复杂内容**：优先云端模型
-- **普通内容**：默认本地模型
-
-### 可选本地模型
-
-如果机器资源更充足，也可以尝试项目相关模型：
-
-- [Qwen3-4B-soul（ModelScope）](https://www.modelscope.cn/models/Ethanwhh/Qwen3-4B-soul/summary)
-- [Qwen3-4B-soul（Ollama）](https://ollama.com/Ethanwhh/Qwen3-4B-soul)
-
----
-
 ## 🚀 快速开始
 
 ### 环境要求
@@ -321,7 +150,7 @@ httpx
 ### 1. 克隆项目
 
 ```bash
-git clone https://github.com/Ethanwhh/soul.git
+git clone https://github.com/Solene200/soul.git
 cd soul
 ```
 
@@ -406,88 +235,9 @@ NEXT_PUBLIC_API_BASE_URL=http://127.0.0.1:8000
   ├─ 心灵奇旅之墙
   └─ 数据分析
 ```
-
----
-
-## 📸 界面预览
-
-### 心灵奇旅介绍
-
-> 项目简介 + 核心功能 + 设计理念
-
-![项目简介](./frontend/public/introduction1.png)
-![核心功能](./frontend/public/introduction2.png)
-![设计理念](./frontend/public/introduction3.png)
-
-
-
-### 首页
-
-> 六大功能统一入口
-
-![首页](./frontend/public/dashboard.png)
-
-### 智能对话
-
-> 流式响应 + 多轮对话 + 情绪陪伴
-
-![智能对话](./frontend/public/chat.png)
-
-### 心理评估
-
-> 标准量表 + 自动评分 + 历史趋势
-
-![心理评估](./frontend/public/assessment.png)
-
-### 训练指导
-
-> 训练详情 + 步骤引导 + 训练记录
-
-![训练指导](./frontend/public/training.png)
-
-### 情绪日记
-
-> 模板引导 + 结构化情绪记录 + AI 反馈
-
-![情绪日记](./frontend/public/diary.png)
-
-### 心灵奇旅之墙
-
-> 爱心墙 + 连胜 + 成就系统
-
-![心灵奇旅之墙](./frontend/public/growth.png)
-
-### 数据分析
-
-> 核心指标 + 情绪趋势 + 情绪分布
-
-![数据分析](./frontend/public/analytics.png)
-
-
-
 ## ⚠️ 限制与说明
 
 - 本项目是 **心理健康辅助工具**，不能替代专业心理咨询和诊疗
 - 评估结果仅供参考，不构成医学诊断
 - AI 生成内容仅作辅助建议，不构成医疗建议
 - 若用户存在自伤、自杀、暴力等风险，请及时寻求专业帮助
-
----
-
-## 🙏 致谢
-
-- [Qwen](https://www.modelscope.cn/models/Qwen/Qwen3-4B-Instruct-2507/summary)
-- [SoulChat2.0](https://github.com/scutcyr/SoulChat2.0)
-- [LLaMA-Factory](https://github.com/hiyouga/LLaMA-Factory)
-- [Ollama](https://ollama.com/)
-- [ModelScope](https://www.modelscope.cn/)
-
----
-
-<div align="center">
-
-**心灵奇旅 Soul**
-
-愿技术不止解决问题，也能温柔地陪人走过一段路。
-
-</div>
